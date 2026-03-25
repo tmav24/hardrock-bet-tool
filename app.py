@@ -82,13 +82,15 @@ APIS_KEY     = _secret("API_SPORTS_API_KEY")
 BDL_KEY      = _secret("BALLDONTLIE_API_KEY")
 ODDS_REGIONS = _secret("REGIONS", "us,us2")
 
-with st.expander("🔑 API Key Status — expand to verify", expanded=False):
-    c1, c2, c3, c4 = st.columns(4)
+with st.expander("🔑 API Key Status", expanded=False):
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("TheSportsDB", "✅ Set" if TSDB_KEY else "❌ Missing")
     c2.metric("The Odds API", "✅ Set" if ODDS_KEY else "❌ Missing")
     c3.metric("API-Sports",  "✅ Set" if APIS_KEY else "❌ Missing")
     c4.metric("Balldontlie", "✅ Set" if BDL_KEY  else "❌ Missing")
-    st.caption(f"Loaded at: {datetime.now().strftime('%H:%M:%S')}")
+    if c5.button("🗑️ Clear Cache", help="Force-clears all cached API responses"):
+        st.cache_data.clear()
+        st.rerun()
 
 # ──────────────────────────────────────────────
 # FULL SPORT CONFIG
@@ -459,12 +461,13 @@ def fetch_odds(sport_key: str) -> tuple:
     Do NOT pass bookmakers param alongside regions — Odds API treats them
     as mutually exclusive and returns empty if both are present.
     """
-    if not ODDS_KEY or not sport_key:
+    api_key = ODDS_KEY.strip()
+    if not api_key or not sport_key:
         return [], "Missing API key or sport key.", None
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
     params = {
-        "apiKey": ODDS_KEY,
-        "regions": ODDS_REGIONS,
+        "apiKey": api_key,
+        "regions": ODDS_REGIONS.strip(),
         "markets": "h2h,spreads,totals",
         "oddsFormat": "american",
     }
@@ -491,7 +494,8 @@ def fetch_odds(sport_key: str) -> tuple:
 def fetch_player_last10_tsdb(player_id: str) -> list:
     if not TSDB_KEY:
         return []
-    url = f"https://www.thesportsdb.com/api/v2/json/{TSDB_KEY}/playereventresults.php"
+    key = TSDB_KEY.strip()
+    url = f"https://www.thesportsdb.com/api/v2/json/{key}/playereventresults.php"
     try:
         r = requests.get(url, params={"id": player_id}, timeout=15)
         r.raise_for_status()
@@ -505,19 +509,30 @@ def fetch_player_last10_tsdb(player_id: str) -> list:
 def search_player_tsdb(player_name: str) -> list:
     if not TSDB_KEY:
         return []
-    url = f"https://www.thesportsdb.com/api/v2/json/{TSDB_KEY}/searchplayers.php"
-    try:
-        r = requests.get(url, params={"p": player_name}, timeout=10)
-        r.raise_for_status()
-        return r.json().get("player") or []
-    except Exception:
-        return []
+    # Normalize: title-case fixes "jaylen brown" -> "Jaylen Brown"
+    normalized = player_name.strip().title()
+    # Try V2 Premium endpoint first
+    for name_attempt in [normalized, player_name.strip()]:
+        for base_url in [
+            f"https://www.thesportsdb.com/api/v2/json/{TSDB_KEY}/searchplayers.php",
+            f"https://www.thesportsdb.com/api/v1/json/{TSDB_KEY}/searchplayers.php",
+        ]:
+            try:
+                r = requests.get(base_url, params={"p": name_attempt}, timeout=10)
+                r.raise_for_status()
+                result = r.json().get("player") or []
+                if result:
+                    return result
+            except Exception:
+                continue
+    return []
 
 @st.cache_data(ttl=7*24*3600, show_spinner=False)
 def fetch_team_roster_tsdb(team_id: str) -> list:
     if not TSDB_KEY:
         return []
-    url = f"https://www.thesportsdb.com/api/v2/json/{TSDB_KEY}/lookup_all_players.php"
+    key = TSDB_KEY.strip()
+    url = f"https://www.thesportsdb.com/api/v2/json/{key}/lookup_all_players.php"
     try:
         r = requests.get(url, params={"id": team_id}, timeout=15)
         r.raise_for_status()
@@ -529,7 +544,8 @@ def fetch_team_roster_tsdb(team_id: str) -> list:
 def search_team_tsdb(team_name: str) -> list:
     if not TSDB_KEY:
         return []
-    url = f"https://www.thesportsdb.com/api/v2/json/{TSDB_KEY}/searchteams.php"
+    key = TSDB_KEY.strip()
+    url = f"https://www.thesportsdb.com/api/v2/json/{key}/searchteams.php"
     try:
         r = requests.get(url, params={"t": team_name}, timeout=10)
         r.raise_for_status()
