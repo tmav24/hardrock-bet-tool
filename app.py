@@ -82,13 +82,13 @@ APIS_KEY     = _secret("API_SPORTS_API_KEY")
 BDL_KEY      = _secret("BALLDONTLIE_API_KEY")
 ODDS_REGIONS = _secret("REGIONS", "us,us2")
 
-with st.expander("🔑 API Key Debug — expand to verify", expanded=False):
+with st.expander("🔑 API Key Status — expand to verify", expanded=False):
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("TheSportsDB", "✅ Set" if TSDB_KEY else "❌ Missing", TSDB_KEY[:6]+"…" if TSDB_KEY else "—")
-    c2.metric("The Odds API", "✅ Set" if ODDS_KEY else "❌ Missing", ODDS_KEY[:6]+"…" if ODDS_KEY else "—")
-    c3.metric("API-Sports",  "✅ Set" if APIS_KEY else "❌ Missing", APIS_KEY[:6]+"…" if APIS_KEY else "—")
-    c4.metric("Balldontlie", "✅ Set" if BDL_KEY  else "❌ Missing", BDL_KEY[:8]+"…"  if BDL_KEY  else "—")
-    st.caption(f"Regions: `{ODDS_REGIONS}`  |  Loaded at: {datetime.now().strftime('%H:%M:%S')}")
+    c1.metric("TheSportsDB", "✅ Set" if TSDB_KEY else "❌ Missing")
+    c2.metric("The Odds API", "✅ Set" if ODDS_KEY else "❌ Missing")
+    c3.metric("API-Sports",  "✅ Set" if APIS_KEY else "❌ Missing")
+    c4.metric("Balldontlie", "✅ Set" if BDL_KEY  else "❌ Missing")
+    st.caption(f"Loaded at: {datetime.now().strftime('%H:%M:%S')}")
 
 # ──────────────────────────────────────────────
 # FULL SPORT CONFIG
@@ -454,23 +454,38 @@ for _k, _v in {
 # ──────────────────────────────────────────────
 
 @st.cache_data(ttl=15*60, show_spinner=False)
-def fetch_odds(sport_key: str) -> list:
+def fetch_odds(sport_key: str) -> tuple:
+    """Returns (data_list, error_str, quota_remaining).
+    Do NOT pass bookmakers param alongside regions — Odds API treats them
+    as mutually exclusive and returns empty if both are present.
+    """
     if not ODDS_KEY or not sport_key:
-        return []
+        return [], "Missing API key or sport key.", None
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
     params = {
         "apiKey": ODDS_KEY,
         "regions": ODDS_REGIONS,
         "markets": "h2h,spreads,totals",
         "oddsFormat": "american",
-        "bookmakers": "draftkings,fanduel,betmgm,hardrock,betonlineag,bovada",
     }
     try:
-        r = requests.get(url, params=params, timeout=10)
+        r = requests.get(url, params=params, timeout=15)
+        quota_remaining = r.headers.get("x-requests-remaining", "?")
+        if r.status_code == 401:
+            return [], "❌ 401 Unauthorized — check your Odds API key.", quota_remaining
+        if r.status_code == 422:
+            return [], f"❌ 422 — sport key {sport_key!r} is invalid or off-season.", quota_remaining
+        if r.status_code == 429:
+            return [], "❌ 429 Rate limit / quota exceeded.", quota_remaining
         r.raise_for_status()
-        return r.json()
-    except Exception:
-        return []
+        data = r.json()
+        if isinstance(data, dict) and data.get("message"):
+            return [], f"❌ API error: {data['message']}", quota_remaining
+        return data if isinstance(data, list) else [], None, quota_remaining
+    except requests.exceptions.Timeout:
+        return [], "❌ Request timed out.", None
+    except Exception as e:
+        return [], f"❌ Unexpected error: {e}", None
 
 @st.cache_data(ttl=24*3600, show_spinner=False)
 def fetch_player_last10_tsdb(player_id: str) -> list:
@@ -620,9 +635,14 @@ def get_market_median(bookmakers: list, market_key: str, team: str):
     n, mid = len(prices), len(prices) // 2
     return round((prices[mid-1]+prices[mid])/2 if n % 2 == 0 else prices[mid], 1)
 
+# Known Hard Rock Bet bookmaker key variants on The Odds API
+HARDROCK_KEYS = {"hardrock", "hardrock_bet", "hardrock_us", "hard_rock", "hardrock_sportsbook"}
+
 def get_hardrock_line(bookmakers: list, market_key: str, team: str):
+    """Fuzzy-match any Hard Rock Bet bookmaker key variant."""
     for bk in bookmakers:
-        if "hardrock" not in bk.get("key", "").lower():
+        bk_key = bk.get("key", "").lower()
+        if not (bk_key in HARDROCK_KEYS or "hardrock" in bk_key or "hard_rock" in bk_key):
             continue
         for mkt in bk.get("markets", []):
             if mkt.get("key") != market_key:
@@ -929,11 +949,33 @@ with tab2:
         st.warning(f"No Odds API key configured for {sport}.")
     else:
         with st.spinner("Fetching lines from The Odds API..."):
-            odds_data = fetch_odds(odds_key)
+            odds_data, odds_error, quota_left = fetch_odds(odds_key)
 
-        if not odds_data:
-            st.warning("No odds data returned. The Odds API key/quota issue, or this sport may not be in-season.")
+        # Always show quota and diagnostic info
+        diag_col1, diag_col2 = st.columns(2)
+        diag_col1.caption(f"📊 Requests remaining (Odds API): **{quota_left}**")
+
+        if odds_error:
+            st.error(odds_error)
+            st.stop()
+        elif not odds_data:
+            # Sport returned 0 events — valid response, just no games
+            st.info(f"✅ Odds API connected (quota left: {quota_left}). No upcoming/live {sport} events found — sport may be off-season or between rounds.")
+            st.stop()
         else:
+            # Show which bookmakers are actually present in the response
+            all_bk_keys = sorted({bk.get("key","") for ev in odds_data for bk in ev.get("bookmakers",[])})
+            hr_present = any(k for k in all_bk_keys if "hardrock" in k or "hard_rock" in k)
+            diag_col2.caption(
+                f"📚 Books in response: `{'`, `'.join(all_bk_keys) or 'none'}`  "
+                f"{'✅ Hard Rock found' if hr_present else '⚠️ Hard Rock NOT in response — HardRock column will show —'}"
+            )
+            if not hr_present:
+                st.warning(
+                    "Hard Rock Bet is not in this Odds API response. Hard Rock is only available in FL, NJ, OH, IN, PA, TN, VA, and AZ. "
+                    "The table will still show the **Market Median** from all other books. "
+                    "HardRock column will display '—'."
+                )
             edge_rows, blowout_warnings = [], []
             blowout_rule = cfg.get("blowout_rule", ("spread", 20))
 
