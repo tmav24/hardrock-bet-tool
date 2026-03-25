@@ -456,18 +456,16 @@ for _k, _v in {
 # ──────────────────────────────────────────────
 
 @st.cache_data(ttl=15*60, show_spinner=False)
-def fetch_odds(sport_key: str) -> tuple:
+def fetch_odds(sport_key: str, api_key: str, regions: str) -> tuple:
     """Returns (data_list, error_str, quota_remaining).
-    Do NOT pass bookmakers param alongside regions — Odds API treats them
-    as mutually exclusive and returns empty if both are present.
+    Key/regions passed as args so cache invalidates if secrets change.
     """
-    api_key = ODDS_KEY.strip()
     if not api_key or not sport_key:
         return [], "Missing API key or sport key.", None
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
     params = {
         "apiKey": api_key,
-        "regions": ODDS_REGIONS.strip(),
+        "regions": regions,
         "markets": "h2h,spreads,totals",
         "oddsFormat": "american",
     }
@@ -475,11 +473,11 @@ def fetch_odds(sport_key: str) -> tuple:
         r = requests.get(url, params=params, timeout=15)
         quota_remaining = r.headers.get("x-requests-remaining", "?")
         if r.status_code == 401:
-            return [], "❌ 401 Unauthorized — check your Odds API key.", quota_remaining
+            return [], f"❌ 401 Unauthorized — Odds API key rejected. Verify key at the-odds-api.com/account", quota_remaining
         if r.status_code == 422:
-            return [], f"❌ 422 — sport key {sport_key!r} is invalid or off-season.", quota_remaining
+            return [], f"❌ 422 — sport key {sport_key!r} invalid or off-season.", quota_remaining
         if r.status_code == 429:
-            return [], "❌ 429 Rate limit / quota exceeded.", quota_remaining
+            return [], "❌ 429 Rate limit / quota exhausted.", quota_remaining
         r.raise_for_status()
         data = r.json()
         if isinstance(data, dict) and data.get("message"):
@@ -491,35 +489,45 @@ def fetch_odds(sport_key: str) -> tuple:
         return [], f"❌ Unexpected error: {e}", None
 
 @st.cache_data(ttl=24*3600, show_spinner=False)
-def fetch_player_last10_tsdb(player_id: str) -> list:
-    if not TSDB_KEY:
+def fetch_player_last10_tsdb(player_id: str, tsdb_key: str) -> list:
+    """Key passed as arg so cache invalidates if secret changes."""
+    if not tsdb_key:
         return []
-    key = TSDB_KEY.strip()
-    url = f"https://www.thesportsdb.com/api/v2/json/{key}/playereventresults.php"
-    try:
-        r = requests.get(url, params={"id": player_id}, timeout=15)
-        r.raise_for_status()
-        data = r.json()
-        results = data.get("results") or data.get("events") or []
-        return results[:10]
-    except Exception:
-        return []
+    # Try multiple V2 endpoints for player event results
+    endpoints = [
+        f"https://www.thesportsdb.com/api/v2/json/{tsdb_key}/playereventresults.php",
+        f"https://www.thesportsdb.com/api/v2/json/{tsdb_key}/eventslast.php",
+        f"https://www.thesportsdb.com/api/v1/json/{tsdb_key}/eventslast.php",
+    ]
+    for url in endpoints:
+        try:
+            r = requests.get(url, params={"id": player_id}, timeout=15)
+            if r.status_code != 200:
+                continue
+            data = r.json()
+            results = (data.get("results") or data.get("events") or
+                       data.get("event") or data.get("data") or [])
+            if results:
+                return results[:10]
+        except Exception:
+            continue
+    return []
 
 @st.cache_data(ttl=24*3600, show_spinner=False)
-def search_player_tsdb(player_name: str) -> list:
-    if not TSDB_KEY:
+def search_player_tsdb(player_name: str, tsdb_key: str) -> list:
+    """Key passed as arg so cache invalidates if secret changes."""
+    if not tsdb_key:
         return []
-    # Normalize: title-case fixes "jaylen brown" -> "Jaylen Brown"
     normalized = player_name.strip().title()
-    # Try V2 Premium endpoint first
     for name_attempt in [normalized, player_name.strip()]:
         for base_url in [
-            f"https://www.thesportsdb.com/api/v2/json/{TSDB_KEY}/searchplayers.php",
-            f"https://www.thesportsdb.com/api/v1/json/{TSDB_KEY}/searchplayers.php",
+            f"https://www.thesportsdb.com/api/v2/json/{tsdb_key}/searchplayers.php",
+            f"https://www.thesportsdb.com/api/v1/json/{tsdb_key}/searchplayers.php",
         ]:
             try:
                 r = requests.get(base_url, params={"p": name_attempt}, timeout=10)
-                r.raise_for_status()
+                if r.status_code != 200:
+                    continue
                 result = r.json().get("player") or []
                 if result:
                     return result
@@ -528,11 +536,10 @@ def search_player_tsdb(player_name: str) -> list:
     return []
 
 @st.cache_data(ttl=7*24*3600, show_spinner=False)
-def fetch_team_roster_tsdb(team_id: str) -> list:
-    if not TSDB_KEY:
+def fetch_team_roster_tsdb(team_id: str, tsdb_key: str) -> list:
+    if not tsdb_key:
         return []
-    key = TSDB_KEY.strip()
-    url = f"https://www.thesportsdb.com/api/v2/json/{key}/lookup_all_players.php"
+    url = f"https://www.thesportsdb.com/api/v2/json/{tsdb_key}/lookup_all_players.php"
     try:
         r = requests.get(url, params={"id": team_id}, timeout=15)
         r.raise_for_status()
@@ -541,10 +548,10 @@ def fetch_team_roster_tsdb(team_id: str) -> list:
         return []
 
 @st.cache_data(ttl=7*24*3600, show_spinner=False)
-def search_team_tsdb(team_name: str) -> list:
-    if not TSDB_KEY:
+def search_team_tsdb(team_name: str, tsdb_key: str) -> list:
+    if not tsdb_key:
         return []
-    key = TSDB_KEY.strip()
+    key = tsdb_key.strip()
     url = f"https://www.thesportsdb.com/api/v2/json/{key}/searchteams.php"
     try:
         r = requests.get(url, params={"t": team_name}, timeout=10)
@@ -554,10 +561,10 @@ def search_team_tsdb(team_name: str) -> list:
         return []
 
 @st.cache_data(ttl=24*3600, show_spinner=False)
-def fetch_player_stats_bdl(player_name: str) -> dict:
-    if not BDL_KEY:
+def fetch_player_stats_bdl(player_name: str, bdl_key: str) -> dict:
+    if not bdl_key:
         return {}
-    headers = {"Authorization": BDL_KEY}
+    headers = {"Authorization": bdl_key}
     try:
         r = requests.get(
             "https://api.balldontlie.io/v1/players",
@@ -581,18 +588,21 @@ def fetch_player_stats_bdl(player_name: str) -> dict:
         return {}
 
 @st.cache_data(ttl=15*60, show_spinner=False)
-def fetch_live_scores_apisports(apisports_base: str, apisports_league: str) -> list:
-    if not APIS_KEY or not apisports_base or not apisports_league:
+def fetch_live_scores_apisports(apisports_base: str, apisports_league: str, apis_key: str) -> list:
+    if not apis_key or not apisports_base or not apisports_league:
         return []
     url = f"https://v1.{apisports_base}.api-sports.io/games"
-    headers = {"x-apisports-key": APIS_KEY}
+    headers = {"x-apisports-key": apis_key, "x-rapidapi-key": apis_key}
     today = datetime.now().strftime("%Y-%m-%d")
     try:
-        r = requests.get(url, params={"date": today, "league": apisports_league}, headers=headers, timeout=10)
+        r = requests.get(url, params={"date": today, "league": apisports_league}, headers=headers, timeout=15)
+        if r.status_code in (401, 403):
+            return [{"_error": f"API-Sports auth failed ({r.status_code})"}]
         r.raise_for_status()
-        return r.json().get("response", [])
-    except Exception:
-        return []
+        data = r.json()
+        return data.get("response", [])
+    except Exception as e:
+        return [{"_error": str(e)}]
 
 # ──────────────────────────────────────────────
 # LOGIC HELPERS
@@ -738,7 +748,7 @@ with st.sidebar:
     if st.button("🔎 Apply — Look Up Player", key="btn_lookup"):
         if player_input.strip():
             with st.spinner(f"Searching TheSportsDB for {player_input}..."):
-                found = search_player_tsdb(player_input.strip())
+                found = search_player_tsdb(player_input.strip(), TSDB_KEY.strip())
             st.session_state["active_player"]  = player_input.strip()
             st.session_state["active_stat"]    = stat_field
             st.session_state["active_line"]    = line_val
@@ -746,7 +756,7 @@ with st.sidebar:
             if found:
                 pid = found[0].get("idPlayer", "")
                 with st.spinner("Pulling last 10 game logs..."):
-                    logs = fetch_player_last10_tsdb(pid)
+                    logs = fetch_player_last10_tsdb(pid, TSDB_KEY.strip())
                 st.session_state["game_logs"] = logs
             else:
                 st.session_state["game_logs"] = []
@@ -762,11 +772,11 @@ with st.sidebar:
     if st.button("📋 Apply — Load Roster", key="btn_roster"):
         if team_name_filter.strip():
             with st.spinner(f"Searching for {team_name_filter}..."):
-                teams_found = search_team_tsdb(team_name_filter.strip())
+                teams_found = search_team_tsdb(team_name_filter.strip(), TSDB_KEY.strip())
             if teams_found:
                 team_id = teams_found[0].get("idTeam", "")
                 with st.spinner("Loading full roster..."):
-                    roster = fetch_team_roster_tsdb(team_id)
+                    roster = fetch_team_roster_tsdb(team_id, TSDB_KEY.strip())
                 st.session_state["roster_list"] = [
                     p.get("strPlayer","") for p in roster if p.get("strPlayer","")
                 ]
@@ -842,7 +852,7 @@ with tab1:
 
     elif player_results == []:
         st.warning(f"TheSportsDB found no results for **{active_player}** — trying Balldontlie fallback...")
-        bdl_stats = fetch_player_stats_bdl(active_player)
+        bdl_stats = fetch_player_stats_bdl(active_player, BDL_KEY.strip())
         if bdl_stats:
             st.success("✅ Balldontlie season averages found.")
             ca, cb, cc, cd = st.columns(4)
@@ -874,7 +884,7 @@ with tab1:
 
         if not game_logs:
             st.warning("No game log data from TheSportsDB — checking Balldontlie...")
-            bdl = fetch_player_stats_bdl(pname)
+            bdl = fetch_player_stats_bdl(pname, BDL_KEY.strip())
             if bdl:
                 st.info("Season averages (Balldontlie — NBA/MLB only):")
                 ca, cb, cc = st.columns(3)
@@ -965,7 +975,7 @@ with tab2:
         st.warning(f"No Odds API key configured for {sport}.")
     else:
         with st.spinner("Fetching lines from The Odds API..."):
-            odds_data, odds_error, quota_left = fetch_odds(odds_key)
+            odds_data, odds_error, quota_left = fetch_odds(odds_key, ODDS_KEY.strip(), ODDS_REGIONS.strip())
 
         # Always show quota and diagnostic info
         diag_col1, diag_col2 = st.columns(2)
@@ -1089,11 +1099,15 @@ with tab3:
         st.info(f"Live scores via API-Sports are not available for **{sport}**. Use the Lines tab for odds.")
     else:
         with st.spinner("Fetching live scores..."):
-            live_games = fetch_live_scores_apisports(apisports_base, apisports_league)
+            live_games = fetch_live_scores_apisports(apisports_base, apisports_league, APIS_KEY.strip())
 
-        if not live_games:
-            st.info("No live or today's games found. API-Sports key may be missing, quota exceeded, or no games today.")
+        # Handle error sentinel
+        if live_games and live_games[0].get("_error"):
+            st.error(f"API-Sports error: {live_games[0]['_error']}")
+        elif not live_games:
+            st.info(f"No {sport} games found for today ({datetime.now().strftime('%b %d')}). Check back on a game day.")
         else:
+            st.caption(f"Showing {len(live_games)} game(s) for today")
             for game in live_games[:20]:
                 g_home = game.get("teams",{}).get("home",{})
                 g_away = game.get("teams",{}).get("away",{})
