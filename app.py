@@ -490,24 +490,40 @@ def fetch_odds(sport_key: str, api_key: str, regions: str) -> tuple:
 
 @st.cache_data(ttl=24*3600, show_spinner=False)
 def fetch_player_last10_tsdb(player_id: str, tsdb_key: str) -> list:
-    """Key passed as arg so cache invalidates if secret changes."""
+    """
+    TheSportsDB Premium V2 game log lookup.
+    Tries every known endpoint + param combination for player event history.
+    """
     if not tsdb_key:
         return []
-    # Try multiple V2 endpoints for player event results
-    endpoints = [
-        f"https://www.thesportsdb.com/api/v2/json/{tsdb_key}/playereventresults.php",
-        f"https://www.thesportsdb.com/api/v2/json/{tsdb_key}/eventslast.php",
-        f"https://www.thesportsdb.com/api/v1/json/{tsdb_key}/eventslast.php",
+    attempts = [
+        # V2 premium — player event results (primary)
+        (f"https://www.thesportsdb.com/api/v2/json/{tsdb_key}/playereventresults.php", {"id": player_id}),
+        # V2 premium — last 5 events for a player
+        (f"https://www.thesportsdb.com/api/v2/json/{tsdb_key}/eventslast.php",         {"id": player_id}),
+        # V2 premium — lookup player events
+        (f"https://www.thesportsdb.com/api/v2/json/{tsdb_key}/lookupeventresults.php", {"id": player_id}),
+        # V1 fallback — last 5 events by player
+        (f"https://www.thesportsdb.com/api/v1/json/{tsdb_key}/eventslast.php",         {"id": player_id}),
+        # V1 fallback — player previous events
+        (f"https://www.thesportsdb.com/api/v1/json/{tsdb_key}/eventspastleague.php",   {"id": player_id}),
     ]
-    for url in endpoints:
+    for url, params in attempts:
         try:
-            r = requests.get(url, params={"id": player_id}, timeout=15)
+            r = requests.get(url, params=params, timeout=15)
             if r.status_code != 200:
                 continue
             data = r.json()
-            results = (data.get("results") or data.get("events") or
-                       data.get("event") or data.get("data") or [])
-            if results:
+            # TheSportsDB uses many different top-level keys depending on endpoint
+            results = (
+                data.get("results") or
+                data.get("events") or
+                data.get("event") or
+                data.get("data") or
+                data.get("players") or
+                []
+            )
+            if isinstance(results, list) and len(results) > 0:
                 return results[:10]
         except Exception:
             continue
@@ -1026,7 +1042,7 @@ with tab2:
                     "The table will still show the **Market Median** from all other books. "
                     "HardRock column will display '—'."
                 )
-            edge_rows, blowout_warnings = [], []
+            edge_rows = []
             blowout_rule = cfg.get("blowout_rule", ("spread", 20))
 
             for event in odds_data:
@@ -1042,21 +1058,6 @@ with tab2:
                         edge    = is_significant_edge(hr_line, median)
                         rule_type, threshold = blowout_rule
 
-                        if market_key == "spreads" and rule_type == "spread":
-                            # Use median spread, not every bookmaker's line (avoids duplicates)
-                            med_spread = get_market_median(bookmakers, "spreads", team)
-                            if med_spread is not None and not (isinstance(med_spread, float) and __import__("math").isnan(med_spread)):
-                                if is_blowout_risk(blowout_rule, spread=med_spread):
-                                    blowout_warnings.append(
-                                        f"⚠️ Blowout Risk — {home} vs {away}: spread {safe_float(med_spread)}"
-                                    )
-                        if market_key == "h2h" and rule_type == "ml":
-                            ml_check = median  # use median ML, not just HardRock
-                            if ml_check and not (isinstance(ml_check, float) and __import__("math").isnan(ml_check)):
-                                if is_blowout_risk(blowout_rule, moneyline=ml_check):
-                                    blowout_warnings.append(
-                                        f"⚠️ Heavy Favorite — {team} ML {safe_odds_int(ml_check)} ({sport})"
-                                    )
 
                         edge_rows.append({
                             "Time": commence,
@@ -1068,9 +1069,6 @@ with tab2:
                             "Diff": round(hr_line - median, 1) if hr_line and median else None,
                             "Edge": edge,
                         })
-
-            for bw in list(dict.fromkeys(blowout_warnings))[:10]:
-                st.markdown(f'<div class="blowout-warn">{bw}</div>', unsafe_allow_html=True)
 
             if edge_rows:
                 df_edges = pd.DataFrame(edge_rows)
