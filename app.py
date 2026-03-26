@@ -434,6 +434,7 @@ for _k, _v in {
     "roster_list": [],
     "excluded_players": [],
     "parlay_legs": [],
+    "tsdb_debug": [],
 }.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
@@ -615,20 +616,14 @@ def search_player_tsdb(player_name: str, tsdb_key: str) -> list:
 
 
 @st.cache_data(ttl=24*3600, show_spinner=False)
-def fetch_player_last10_tsdb(player_id: str, tsdb_key: str) -> list:
+def fetch_player_last10_tsdb(player_id: str, tsdb_key: str) -> tuple:
     """
-    TheSportsDB per-game player stats.
-    V2: key in X-API-KEY header. V1: key in URL path.
-
-    Endpoint chain:
-    1. V2 playerstatistics.php   — per-game log (primary)
-    2. V2 lookupplayerstatistics.php — alternate
-    3. V2 playerevents.php       — event list fallback
-    4. V1 playerstatistics.php   — v1 fallback
-    5. V1 playerevents.php       — v1 event fallback
+    Returns (logs: list, debug_log: list).
+    Tries every plausible TSDB endpoint and logs exactly what each returns.
     """
+    import json as _json
     if not tsdb_key or not player_id:
-        return []
+        return [], ["No key or player ID."]
 
     attempts = [
         ("https://www.thesportsdb.com/api/v2/json/playerstatistics.php",
@@ -643,26 +638,43 @@ def fetch_player_last10_tsdb(player_id: str, tsdb_key: str) -> list:
          {"id": player_id}, ["events", "event", "results"]),
     ]
 
+    debug_log = []
     for url, params, result_keys in attempts:
-        data = _tsdb_get(url, params, tsdb_key)
-        if not data:
-            continue
-        results = None
-        for key in result_keys:
-            candidate = data.get(key)
-            if isinstance(candidate, list) and len(candidate) > 0:
-                results = candidate
-                break
-        if not results:
-            continue
-        normalized = [_normalize_tsdb_game(g) for g in results]
-        valid = [g for g in normalized if _has_numeric_stats(g)]
-        if valid:
-            return valid[:10]
-        if normalized:
-            return normalized[:10]
+        label = url.split("/json/")[-1]
+        try:
+            hdrs = {"X-API-KEY": tsdb_key} if "/api/v2/" in url else {}
+            r = requests.get(url, params=params, headers=hdrs, timeout=15)
+            if r.status_code != 200:
+                debug_log.append(f"[{r.status_code}] {label}")
+                continue
+            body = r.json()
+            top_keys = list(body.keys()) if isinstance(body, dict) else type(body).__name__
+            list_lens = {k: len(v) for k, v in body.items() if isinstance(v, list)} if isinstance(body, dict) else {}
+            snippet = _json.dumps(body)[:300]
+            debug_log.append(f"[200] {label} keys={top_keys} lists={list_lens}")
+            debug_log.append(f"  raw: {snippet}")
 
-    return []
+            results = None
+            for key in result_keys:
+                candidate = body.get(key)
+                if isinstance(candidate, list) and len(candidate) > 0:
+                    results = candidate
+                    break
+            if not results:
+                continue
+
+            normalized = [_normalize_tsdb_game(g) for g in results]
+            valid = [g for g in normalized if _has_numeric_stats(g)]
+            if valid:
+                debug_log.append(f"  >>> SUCCESS: {len(valid)} stat rows")
+                return valid[:10], debug_log
+            if normalized:
+                debug_log.append(f"  >>> {len(normalized)} rows but no numeric stats after normalize")
+                return normalized[:10], debug_log
+        except Exception as e:
+            debug_log.append(f"[ERR] {label}: {e}")
+
+    return [], debug_log
 
 
 @st.cache_data(ttl=7*24*3600, show_spinner=False)
@@ -1014,10 +1026,12 @@ with st.sidebar:
             if found:
                 pid = found[0].get("idPlayer", "")
                 with st.spinner("Pulling game logs from TheSportsDB..."):
-                    logs = fetch_player_last10_tsdb(pid, TSDB_KEY.strip())
+                    logs, tsdb_debug = fetch_player_last10_tsdb(pid, TSDB_KEY.strip())
                 st.session_state["game_logs"] = logs
+                st.session_state["tsdb_debug"] = tsdb_debug
             else:
                 st.session_state["game_logs"] = []
+                st.session_state["tsdb_debug"] = []
         else:
             st.warning("Enter a player name first.")
 
@@ -1146,6 +1160,11 @@ with tab1:
             pid_debug = player.get("idPlayer", "")
             st.write(f"**Player ID:** `{pid_debug}`")
             st.write(f"**Game logs returned:** `{len(game_logs) if game_logs else 0}`")
+            tsdb_debug = st.session_state.get("tsdb_debug", [])
+            if tsdb_debug:
+                st.markdown("**Endpoint probe results:**")
+                for line in tsdb_debug:
+                    st.code(line)
             if game_logs:
                 st.write("**First game keys/values:**")
                 st.json(game_logs[0])
