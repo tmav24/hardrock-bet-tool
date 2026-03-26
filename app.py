@@ -8,6 +8,7 @@ import requests
 import pandas as pd
 from datetime import datetime
 import time
+import math
 
 # ──────────────────────────────────────────────
 # PAGE CONFIG
@@ -806,7 +807,6 @@ def is_significant_edge(hr, median, market_key: str = "h2h") -> bool:
       (avoids noise on big favorites like -3000 where 15pts means nothing)
     - Spreads/Totals: flag if point difference >= 0.5
     """
-    import math
     if hr is None or median is None:
         return False
     if isinstance(hr, float) and math.isnan(hr): return False
@@ -831,7 +831,6 @@ def safe_odds_int(val) -> str:
     try:
         if val is None:
             return "—"
-        import math
         if isinstance(val, float) and math.isnan(val):
             return "—"
         return f"{int(val):+d}"
@@ -843,7 +842,6 @@ def safe_float(val) -> str:
     try:
         if val is None:
             return "—"
-        import math
         if isinstance(val, float) and math.isnan(val):
             return "—"
         return f"{val:+.1f}"
