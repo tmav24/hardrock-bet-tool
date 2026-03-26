@@ -7,7 +7,6 @@ import streamlit as st
 import requests
 import pandas as pd
 from datetime import datetime
-import time
 import math
 
 # ──────────────────────────────────────────────
@@ -46,7 +45,6 @@ html, body, [class*="css"] {
 .badge-gold  { background:#78350f; color:#fcd34d; border-radius:6px; padding:2px 8px; font-size:0.78rem; font-weight:700; }
 .badge-red   { background:#7f1d1d; color:#fca5a5; border-radius:6px; padding:2px 8px; font-size:0.78rem; font-weight:700; }
 .badge-gray  { background:#1f2937; color:#94a3b8; border-radius:6px; padding:2px 8px; font-size:0.78rem; font-weight:700; }
-.blowout-warn { background:linear-gradient(90deg,#7f1d1d,#991b1b); border-left:4px solid #ef4444; border-radius:8px; padding:.75rem 1rem; margin:.5rem 0; font-weight:600; color:#fca5a5; font-size:.9rem; }
 .edge-alert   { background:linear-gradient(90deg,#78350f,#92400e); border-left:4px solid #f59e0b; border-radius:8px; padding:.75rem 1rem; margin:.5rem 0; font-weight:600; color:#fcd34d; font-size:.9rem; }
 .sticky-table-wrapper { overflow-x:auto; -webkit-overflow-scrolling:touch; border-radius:10px; border:1px solid #1f2937; }
 .sticky-table-wrapper table { border-collapse:collapse; width:100%; font-size:.85rem; }
@@ -95,11 +93,8 @@ with st.expander("🔑 API Key Status", expanded=False):
 
 # ──────────────────────────────────────────────
 # FULL SPORT CONFIG
-# Covers every sport available across:
-#   TheSportsDB (Premium V2) / The Odds API / API-Sports
 # ──────────────────────────────────────────────
 SPORT_CONFIG = {
-    # ── NORTH AMERICAN PRO ────────────────────
     "NBA": {
         "odds_key": "basketball_nba",
         "apisports_base": "basketball", "apisports_league": "12",
@@ -177,7 +172,6 @@ SPORT_CONFIG = {
         "default_lines": {"intPoints":18.5,"intRebounds":5.5,"intAssists":4.5},
         "blowout_rule": ("spread", 12),
     },
-    # ── SOCCER ────────────────────────────────
     "EPL": {
         "odds_key": "soccer_epl",
         "apisports_base": "football", "apisports_league": "39",
@@ -276,7 +270,6 @@ SPORT_CONFIG = {
         "default_lines": {"intGoals":0.5,"intAssists":0.5,"intShots":2.5},
         "blowout_rule": ("ml", -400),
     },
-    # ── TENNIS ────────────────────────────────
     "ATP Tennis": {
         "odds_key": "tennis_atp_french_open",
         "apisports_base": "tennis", "apisports_league": "1",
@@ -291,7 +284,6 @@ SPORT_CONFIG = {
         "default_lines": {"intAces":3.5,"intDoubleFaults":3.5,"intGamesWon":18.5},
         "blowout_rule": ("ml", -500),
     },
-    # ── GOLF ──────────────────────────────────
     "PGA Tour": {
         "odds_key": "golf_pga_championship",
         "apisports_base": "golf", "apisports_league": "1",
@@ -313,7 +305,6 @@ SPORT_CONFIG = {
         "default_lines": {"intScore":-5.5,"intBirdies":5.5},
         "blowout_rule": ("ml", -600),
     },
-    # ── MMA / BOXING ──────────────────────────
     "UFC / MMA": {
         "odds_key": "mma_mixed_martial_arts",
         "apisports_base": "mma", "apisports_league": "1",
@@ -328,7 +319,6 @@ SPORT_CONFIG = {
         "default_lines": {"intPunchesLanded":60.5,"intKnockdowns":0.5},
         "blowout_rule": ("ml", -500),
     },
-    # ── MOTOR SPORT ───────────────────────────
     "Formula 1": {
         "odds_key": "motorsport_formula_one",
         "apisports_base": "formula-1", "apisports_league": "1",
@@ -343,9 +333,8 @@ SPORT_CONFIG = {
         "default_lines": {"intPosition":10.5,"intLapsLed":20.5},
         "blowout_rule": ("ml", -600),
     },
-    # ── RUGBY / AUSSIE RULES ──────────────────
     "Rugby Union — Six Nations": {
-        "odds_key": "rugbyleague_nrl",
+        "odds_key": "rugbyunion_six_nations",
         "apisports_base": "rugby", "apisports_league": "17",
         "stat_fields": {"Tries":"intTries","Conversions":"intConversions"},
         "default_lines": {"intTries":0.5,"intConversions":0.5},
@@ -365,7 +354,6 @@ SPORT_CONFIG = {
         "default_lines": {"intDisposals":22.5,"intGoals":1.5,"intMarks":5.5},
         "blowout_rule": ("spread", 25),
     },
-    # ── CRICKET ───────────────────────────────
     "Cricket — IPL": {
         "odds_key": "cricket_ipl",
         "apisports_base": "cricket", "apisports_league": "1",
@@ -380,7 +368,6 @@ SPORT_CONFIG = {
         "default_lines": {"intRuns":40.5,"intWickets":2.5},
         "blowout_rule": ("ml", -400),
     },
-    # ── ESPORTS ───────────────────────────────
     "CS2 (Counter-Strike)": {
         "odds_key": "esports_cs2",
         "apisports_base": None, "apisports_league": None,
@@ -409,7 +396,6 @@ SPORT_CONFIG = {
         "default_lines": {"intKills":17.5,"intDeaths":14.5,"intAssists":5.5},
         "blowout_rule": ("spread", 10),
     },
-    # ── OTHER ─────────────────────────────────
     "Table Tennis": {
         "odds_key": "tabletennis_tt_cup",
         "apisports_base": "table-tennis", "apisports_league": "1",
@@ -453,14 +439,106 @@ for _k, _v in {
         st.session_state[_k] = _v
 
 # ──────────────────────────────────────────────
+# TSDB STAT KEY NORMALIZER
+# Maps every known TheSportsDB stat key variant → our internal intXxx keys
+# ──────────────────────────────────────────────
+_TSDB_STAT_NORMALIZE = {
+    # ── Basketball ──────────────────────────────
+    "intPointsScored":     "intPoints",
+    "intScore":            "intPoints",
+    "intReboundsTotal":    "intRebounds",
+    "intRebounds":         "intRebounds",
+    "intAssistsTotal":     "intAssists",
+    "intAssists":          "intAssists",
+    "int3PointsMade":      "intThrees",
+    "intThreesMade":       "intThrees",
+    "intThreesScored":     "intThrees",
+    "intThrees":           "intThrees",
+    "intStealsTotal":      "intSteals",
+    "intSteals":           "intSteals",
+    "intBlocksTotal":      "intBlocks",
+    "intBlocks":           "intBlocks",
+    # ── American Football ────────────────────────
+    "intPassingYards":     "intPassingYards",
+    "intRushingYards":     "intRushingYards",
+    "intReceivingYards":   "intReceivingYards",
+    "intTouchdownsTotal":  "intTouchdowns",
+    "intTouchdowns":       "intTouchdowns",
+    "intReceptionsTotal":  "intReceptions",
+    "intReceptions":       "intReceptions",
+    "intInterceptions":    "intInterceptions",
+    # ── Baseball ─────────────────────────────────
+    "intHitsTotal":        "intHits",
+    "intHits":             "intHits",
+    "intStrikeouts":       "intStrikeouts",
+    "intHomeRuns":         "intHomeRuns",
+    "intRBI":              "intRBI",
+    "intWalks":            "intWalks",
+    "intRuns":             "intRuns",
+    # ── Hockey ───────────────────────────────────
+    "intGoalsTotal":       "intGoals",
+    "intGoals":            "intGoals",
+    "intShotsTotal":       "intShots",
+    "intShots":            "intShots",
+    "intSavesTotal":       "intSaves",
+    "intSaves":            "intSaves",
+    "intPenaltyMinutes":   "intPenaltyMinutes",
+    "intPoints":           "intPoints",
+    # ── Soccer ───────────────────────────────────
+    "intYellowCards":      "intYellowCards",
+    "intRedCards":         "intRedCards",
+}
+
+
+def _normalize_tsdb_game(raw: dict) -> dict:
+    """
+    Remap TheSportsDB raw stat keys → our internal intXxx keys.
+    Preserves date and opponent fields for display.
+    """
+    out = {}
+    for k, v in raw.items():
+        mapped = _TSDB_STAT_NORMALIZE.get(k, k)
+        out[mapped] = v
+
+    # Normalize date field
+    for date_key in ("dateEvent", "strDate", "strTimestamp", "date"):
+        if raw.get(date_key):
+            out["dateEvent"] = str(raw[date_key])[:10]
+            break
+    if "dateEvent" not in out:
+        out["dateEvent"] = ""
+
+    # Normalize opponent field
+    for opp_key in ("strOpponent", "strAwayTeam", "strHomeTeam", "strTeam", "opponent"):
+        if raw.get(opp_key):
+            out["strOpponent"] = raw[opp_key]
+            break
+    if "strOpponent" not in out:
+        out["strOpponent"] = ""
+
+    return out
+
+
+def _has_numeric_stats(game: dict) -> bool:
+    """Return True if game dict has at least one intXxx key with a numeric value."""
+    for k, v in game.items():
+        if not k.startswith("int"):
+            continue
+        try:
+            f = float(v)
+            if not math.isnan(f):
+                return True
+        except (TypeError, ValueError):
+            pass
+    return False
+
+
+# ──────────────────────────────────────────────
 # API HELPERS
 # ──────────────────────────────────────────────
 
 @st.cache_data(ttl=15*60, show_spinner=False)
 def fetch_odds(sport_key: str, api_key: str, regions: str) -> tuple:
-    """Returns (data_list, error_str, quota_remaining).
-    Key/regions passed as args so cache invalidates if secrets change.
-    """
     if not api_key or not sport_key:
         return [], "Missing API key or sport key.", None
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
@@ -474,7 +552,7 @@ def fetch_odds(sport_key: str, api_key: str, regions: str) -> tuple:
         r = requests.get(url, params=params, timeout=15)
         quota_remaining = r.headers.get("x-requests-remaining", "?")
         if r.status_code == 401:
-            return [], f"❌ 401 Unauthorized — Odds API key rejected. Verify key at the-odds-api.com/account", quota_remaining
+            return [], "❌ 401 Unauthorized — Odds API key rejected.", quota_remaining
         if r.status_code == 422:
             return [], f"❌ 422 — sport key {sport_key!r} invalid or off-season.", quota_remaining
         if r.status_code == 429:
@@ -489,54 +567,23 @@ def fetch_odds(sport_key: str, api_key: str, regions: str) -> tuple:
     except Exception as e:
         return [], f"❌ Unexpected error: {e}", None
 
-@st.cache_data(ttl=24*3600, show_spinner=False)
-def fetch_player_last10_tsdb(player_id: str, tsdb_key: str) -> list:
-    """
-    TheSportsDB Premium V2 game log lookup.
-    Tries every known endpoint + param combination for player event history.
-    """
-    if not tsdb_key:
-        return []
-    attempts = [
-        # V2 premium — player event results (primary)
-        (f"https://www.thesportsdb.com/api/v2/json/{tsdb_key}/playereventresults.php", {"id": player_id}),
-        # V2 premium — last 5 events for a player
-        (f"https://www.thesportsdb.com/api/v2/json/{tsdb_key}/eventslast.php",         {"id": player_id}),
-        # V2 premium — lookup player events
-        (f"https://www.thesportsdb.com/api/v2/json/{tsdb_key}/lookupeventresults.php", {"id": player_id}),
-        # V1 fallback — last 5 events by player
-        (f"https://www.thesportsdb.com/api/v1/json/{tsdb_key}/eventslast.php",         {"id": player_id}),
-        # V1 fallback — player previous events
-        (f"https://www.thesportsdb.com/api/v1/json/{tsdb_key}/eventspastleague.php",   {"id": player_id}),
-    ]
-    for url, params in attempts:
-        try:
-            r = requests.get(url, params=params, timeout=15)
-            if r.status_code != 200:
-                continue
-            data = r.json()
-            # TheSportsDB uses many different top-level keys depending on endpoint
-            results = (
-                data.get("results") or
-                data.get("events") or
-                data.get("event") or
-                data.get("data") or
-                data.get("players") or
-                []
-            )
-            if isinstance(results, list) and len(results) > 0:
-                return results[:10]
-        except Exception:
-            continue
-    return []
 
 @st.cache_data(ttl=24*3600, show_spinner=False)
 def search_player_tsdb(player_name: str, tsdb_key: str) -> list:
-    """Key passed as arg so cache invalidates if secret changes."""
+    """
+    Search TheSportsDB V2 then V1.
+    Tries Title Case, original casing, and last-name-only as fallback.
+    """
     if not tsdb_key:
         return []
-    normalized = player_name.strip().title()
-    for name_attempt in [normalized, player_name.strip()]:
+    cleaned = player_name.strip()
+    # Build deduplicated name variants
+    name_variants = list(dict.fromkeys(filter(None, [
+        cleaned.title(),
+        cleaned,
+        cleaned.split()[-1].title() if " " in cleaned else None,
+    ])))
+    for name_attempt in name_variants:
         for base_url in [
             f"https://www.thesportsdb.com/api/v2/json/{tsdb_key}/searchplayers.php",
             f"https://www.thesportsdb.com/api/v1/json/{tsdb_key}/searchplayers.php",
@@ -552,6 +599,72 @@ def search_player_tsdb(player_name: str, tsdb_key: str) -> list:
                 continue
     return []
 
+
+@st.cache_data(ttl=24*3600, show_spinner=False)
+def fetch_player_last10_tsdb(player_id: str, tsdb_key: str) -> list:
+    """
+    TheSportsDB Premium V2 — correct endpoint chain for per-game player stats.
+
+    Priority:
+    1. v2/playerstatistics.php?id=        — per-game log (premium)
+    2. v2/lookupplayerstatistics.php?id=  — alternate premium path
+    3. v2/playerevents.php?id=            — recent events with player
+    4. v1/playerstatistics.php?id=        — v1 fallback
+    5. v1/playerevents.php?id=            — v1 events fallback
+
+    All previous attempts used wrong endpoints (eventslast, lookupeventresults,
+    eventspastleague) that take team/event IDs, not player IDs — they all return
+    empty silently. This chain uses only player-ID-accepting endpoints.
+    """
+    if not tsdb_key or not player_id:
+        return []
+
+    base_v2 = f"https://www.thesportsdb.com/api/v2/json/{tsdb_key}"
+    base_v1 = f"https://www.thesportsdb.com/api/v1/json/{tsdb_key}"
+
+    attempts = [
+        (f"{base_v2}/playerstatistics.php",       {"id": player_id}, ["playerstatistics", "results", "data"]),
+        (f"{base_v2}/lookupplayerstatistics.php",  {"id": player_id}, ["playerstatistics", "results", "data"]),
+        (f"{base_v2}/playerevents.php",            {"id": player_id}, ["events", "event", "results"]),
+        (f"{base_v1}/playerstatistics.php",        {"id": player_id}, ["playerstatistics", "results", "data"]),
+        (f"{base_v1}/playerevents.php",            {"id": player_id}, ["events", "event", "results"]),
+    ]
+
+    for url, params, result_keys in attempts:
+        try:
+            r = requests.get(url, params=params, timeout=15)
+            if r.status_code != 200:
+                continue
+            data = r.json()
+
+            results = None
+            for key in result_keys:
+                candidate = data.get(key)
+                if isinstance(candidate, list) and len(candidate) > 0:
+                    results = candidate
+                    break
+
+            if not results:
+                continue
+
+            normalized = [_normalize_tsdb_game(g) for g in results]
+
+            # Prefer rows that have actual numeric stats
+            valid = [g for g in normalized if _has_numeric_stats(g)]
+            if valid:
+                return valid[:10]
+
+            # Return normalized anyway so ESPN fallback can be skipped if we at
+            # least got event metadata (opponent/date) — caller checks for stats
+            if normalized:
+                return normalized[:10]
+
+        except Exception:
+            continue
+
+    return []
+
+
 @st.cache_data(ttl=7*24*3600, show_spinner=False)
 def fetch_team_roster_tsdb(team_id: str, tsdb_key: str) -> list:
     if not tsdb_key:
@@ -564,12 +677,12 @@ def fetch_team_roster_tsdb(team_id: str, tsdb_key: str) -> list:
     except Exception:
         return []
 
+
 @st.cache_data(ttl=7*24*3600, show_spinner=False)
 def search_team_tsdb(team_name: str, tsdb_key: str) -> list:
     if not tsdb_key:
         return []
-    key = tsdb_key.strip()
-    url = f"https://www.thesportsdb.com/api/v2/json/{key}/searchteams.php"
+    url = f"https://www.thesportsdb.com/api/v2/json/{tsdb_key}/searchteams.php"
     try:
         r = requests.get(url, params={"t": team_name}, timeout=10)
         r.raise_for_status()
@@ -577,15 +690,15 @@ def search_team_tsdb(team_name: str, tsdb_key: str) -> list:
     except Exception:
         return []
 
+
 @st.cache_data(ttl=24*3600, show_spinner=False)
 def fetch_player_stats_espn(player_name: str) -> list:
     """
-    ESPN public API fallback for player game logs.
-    No key required. Searches ESPN athlete lookup then pulls recent game log.
-    Returns list of dicts with normalized stat keys matching TheSportsDB format.
+    ESPN public API fallback — no key required.
+    Searches ESPN athlete lookup then pulls recent game log.
+    Returns list of dicts with normalized intXxx stat keys.
     """
     try:
-        # Step 1: search ESPN for athlete ID
         search_url = "https://site.api.espn.com/apis/common/v3/search"
         sr = requests.get(search_url, params={"query": player_name, "limit": 5, "type": "athlete"}, timeout=10)
         if sr.status_code != 200:
@@ -594,11 +707,9 @@ def fetch_player_stats_espn(player_name: str) -> list:
         athlete_id = None
         sport_path = None
         for res in results:
-            items = res.get("contents", [])
-            for item in items:
+            for item in res.get("contents", []):
                 if item.get("type") == "athlete":
                     athlete_id = item.get("id")
-                    # Determine sport from description
                     desc = (item.get("description") or "").lower()
                     if "basketball" in desc or "nba" in desc:
                         sport_path = "basketball/nba"
@@ -617,70 +728,55 @@ def fetch_player_stats_espn(player_name: str) -> list:
         if not athlete_id or not sport_path:
             return []
 
-        # Step 2: pull game log
+        # Season: for NBA/NHL use current year if after July, else prior year.
+        # For NFL/MLB use current calendar year.
+        now = datetime.now()
+        if sport_path in ("basketball/nba", "hockey/nhl"):
+            espn_season = str(now.year) if now.month >= 9 else str(now.year - 1 if now.month < 7 else now.year)
+        else:
+            espn_season = str(now.year)
         log_url = f"https://site.web.api.espn.com/apis/common/v3/sports/{sport_path}/athletes/{athlete_id}/gamelog"
-        lr = requests.get(log_url, params={"season": "2025"}, timeout=10)
+        lr = requests.get(log_url, params={"season": espn_season}, timeout=10)
         if lr.status_code != 200:
             return []
         log_data = lr.json()
 
-        # Step 3: parse into normalized dicts
-        categories = log_data.get("categories", [])
-        events = log_data.get("events", {})
-        stat_labels = []
-        for cat in categories:
-            for label in cat.get("labels", []):
-                stat_labels.append(label)
-
-        # Map ESPN labels to TheSportsDB-style keys
         label_map = {
             "PTS": "intPoints", "REB": "intRebounds", "AST": "intAssists",
             "3PM": "intThrees", "STL": "intSteals", "BLK": "intBlocks",
-            "PY": "intPassingYards", "RY": "intRushingYards", "REC": "intReceivingYards",
-            "TD": "intTouchdowns", "H": "intHits", "SO": "intStrikeouts",
+            "PY":  "intPassingYards", "RY": "intRushingYards", "REC": "intReceivingYards",
+            "TD":  "intTouchdowns",  "H":  "intHits",  "SO": "intStrikeouts",
             "RBI": "intRBI", "HR": "intHomeRuns", "G": "intGoals", "A": "intAssists",
-            "S": "intShots", "SV": "intSaves",
+            "S":   "intShots", "SV": "intSaves",
         }
 
-        normalized = []
-        event_items = log_data.get("events", {})
-        # ESPN gamelog structure: events is a dict keyed by event id
-        if isinstance(event_items, dict):
-            event_list = list(event_items.values())[:10]
-        else:
-            event_list = event_items[:10]
-
-        # Get stats array — ESPN stores as parallel arrays
-        all_stats = log_data.get("seasonTypes", [])
         stat_rows = []
-        for stype in all_stats:
+        for stype in log_data.get("seasonTypes", []):
             for cat in stype.get("categories", []):
+                labels = cat.get("labels", [])
                 for event_stat in cat.get("events", []):
                     stat_rows.append({
-                        "eventId": event_stat.get("eventId"),
-                        "stats": event_stat.get("stats", []),
-                        "labels": cat.get("labels", []),
+                        "labels": labels,
+                        "stats":  event_stat.get("stats", []),
                     })
 
+        normalized = []
         for row in stat_rows[:10]:
-            game = {}
-            labels = row.get("labels", [])
-            stats  = row.get("stats", [])
-            for i, lbl in enumerate(labels):
+            game = {"dateEvent": "", "strOpponent": ""}
+            for i, lbl in enumerate(row["labels"]):
                 mapped = label_map.get(lbl, f"int{lbl}")
-                if i < len(stats):
+                if i < len(row["stats"]):
                     try:
-                        game[mapped] = float(stats[i])
+                        game[mapped] = float(row["stats"][i])
                     except (ValueError, TypeError):
                         pass
-            game["dateEvent"] = ""
-            game["strOpponent"] = ""
-            if game:
+            if _has_numeric_stats(game):
                 normalized.append(game)
 
         return normalized[:10]
     except Exception:
         return []
+
 
 @st.cache_data(ttl=24*3600, show_spinner=False)
 def fetch_player_stats_bdl(player_name: str, bdl_key: str) -> dict:
@@ -698,9 +794,10 @@ def fetch_player_stats_bdl(player_name: str, bdl_key: str) -> dict:
         if not players:
             return {}
         pid = players[0]["id"]
+        season = datetime.now().year - (1 if datetime.now().month < 8 else 0)
         sr = requests.get(
             "https://api.balldontlie.io/v1/season_averages",
-            params={"player_ids[]": pid, "season": datetime.now().year - (1 if datetime.now().month < 8 else 0)},
+            params={"player_ids[]": pid, "season": season},
             headers=headers, timeout=10,
         )
         sr.raise_for_status()
@@ -708,6 +805,7 @@ def fetch_player_stats_bdl(player_name: str, bdl_key: str) -> dict:
         return avgs[0] if avgs else {}
     except Exception:
         return {}
+
 
 @st.cache_data(ttl=15*60, show_spinner=False)
 def fetch_live_scores_apisports(apisports_base: str, apisports_league: str, apis_key: str) -> list:
@@ -721,10 +819,10 @@ def fetch_live_scores_apisports(apisports_base: str, apisports_league: str, apis
         if r.status_code in (401, 403):
             return [{"_error": f"API-Sports auth failed ({r.status_code})"}]
         r.raise_for_status()
-        data = r.json()
-        return data.get("response", [])
+        return r.json().get("response", [])
     except Exception as e:
         return [{"_error": str(e)}]
+
 
 # ──────────────────────────────────────────────
 # LOGIC HELPERS
@@ -736,6 +834,8 @@ def american_to_decimal(odds: int) -> float:
     return round(1 + 100 / abs(odds), 4)
 
 def decimal_to_american(dec: float) -> int:
+    if dec <= 1.0:
+        return 0
     if dec >= 2:
         return int((dec - 1) * 100)
     return int(-100 / (dec - 1))
@@ -771,6 +871,10 @@ def compute_hit_rate(game_logs: list, stat_field: str, line: float) -> dict:
 def get_market_median(bookmakers: list, market_key: str, team: str):
     prices = []
     for bk in bookmakers:
+        # Exclude Hard Rock from the market median so the comparison is fair
+        bk_key = bk.get("key", "").lower()
+        if "hardrock" in bk_key or "hard_rock" in bk_key:
+            continue
         for mkt in bk.get("markets", []):
             if mkt.get("key") != market_key:
                 continue
@@ -783,11 +887,9 @@ def get_market_median(bookmakers: list, market_key: str, team: str):
     n, mid = len(prices), len(prices) // 2
     return round((prices[mid-1]+prices[mid])/2 if n % 2 == 0 else prices[mid], 1)
 
-# Known Hard Rock Bet bookmaker key variants on The Odds API
-HARDROCK_KEYS = {"hardrock", "hardrock_bet", "hardrock_us", "hard_rock", "hardrock_sportsbook"}
+HARDROCK_KEYS = {"hardrock", "hardrock_bet", "hardrock_us", "hard_rock", "hardrock_sportsbook", "hardrockbet", "hardrockbet_az"}
 
 def get_hardrock_line(bookmakers: list, market_key: str, team: str):
-    """Fuzzy-match any Hard Rock Bet bookmaker key variant."""
     for bk in bookmakers:
         bk_key = bk.get("key", "").lower()
         if not (bk_key in HARDROCK_KEYS or "hardrock" in bk_key or "hard_rock" in bk_key):
@@ -801,12 +903,6 @@ def get_hardrock_line(bookmakers: list, market_key: str, team: str):
     return None
 
 def is_significant_edge(hr, median, market_key: str = "h2h") -> bool:
-    """
-    Market-aware edge detection:
-    - H2H moneyline: only flag if diff >= 8% of the median absolute value
-      (avoids noise on big favorites like -3000 where 15pts means nothing)
-    - Spreads/Totals: flag if point difference >= 0.5
-    """
     if hr is None or median is None:
         return False
     if isinstance(hr, float) and math.isnan(hr): return False
@@ -814,36 +910,21 @@ def is_significant_edge(hr, median, market_key: str = "h2h") -> bool:
     diff = abs(hr - median)
     if market_key in ("spreads", "totals"):
         return diff >= 0.5
-    else:  # h2h moneyline — proportional threshold
-        base = abs(median) if median != 0 else 1
-        return diff >= max(20, base * 0.08)
-
-def is_blowout_risk(rule, spread=None, moneyline=None) -> bool:
-    rule_type, threshold = rule
-    if rule_type == "spread" and spread is not None and abs(spread) > threshold:
-        return True
-    if rule_type == "ml" and moneyline is not None and moneyline < threshold:
-        return True
-    return False
+    base = abs(median) if median != 0 else 1
+    return diff >= max(20, base * 0.08)
 
 def safe_odds_int(val) -> str:
-    """Convert odds value to formatted string, safely handling None/NaN/non-numeric."""
     try:
-        if val is None:
-            return "—"
-        if isinstance(val, float) and math.isnan(val):
-            return "—"
+        if val is None: return "—"
+        if isinstance(val, float) and math.isnan(val): return "—"
         return f"{int(val):+d}"
     except (TypeError, ValueError):
         return "—"
 
 def safe_float(val) -> str:
-    """Format a float safely, returning — for None/NaN."""
     try:
-        if val is None:
-            return "—"
-        if isinstance(val, float) and math.isnan(val):
-            return "—"
+        if val is None: return "—"
+        if isinstance(val, float) and math.isnan(val): return "—"
         return f"{val:+.1f}"
     except (TypeError, ValueError):
         return "—"
@@ -857,11 +938,19 @@ def build_hit_rate_badge(rate) -> str:
         return f'<span class="badge-gold">🟡 {rate}%</span>'
     return f'<span class="badge-red">🔴 {rate}%</span>'
 
+def _html_escape(val) -> str:
+    s = str(val)
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
 def make_sticky_table(df: pd.DataFrame) -> str:
-    headers = "".join(f"<th>{c}</th>" for c in df.columns)
+    headers = "".join(f"<th>{_html_escape(c)}</th>" for c in df.columns)
     body = ""
     for _, row in df.iterrows():
-        cells = "".join(f"<td>{v}</td>" for v in row)
+        cells = "".join(
+            # Don't escape badge HTML — it's intentional markup
+            f"<td>{v}</td>" if isinstance(v, str) and v.startswith("<span") else f"<td>{_html_escape(v)}</td>"
+            for v in row
+        )
         body += f"<tr>{cells}</tr>"
     return (
         f'<div class="sticky-table-wrapper">'
@@ -892,7 +981,6 @@ with st.sidebar:
 
     green_light = st.toggle("🟢 Green Light (70%+ only)", value=False)
 
-    # ── PLAYER LOOKUP SECTION ──────────────────
     st.markdown("---")
     st.markdown("### 🔍 Player Lookup")
 
@@ -912,7 +1000,7 @@ with st.sidebar:
             st.session_state["player_results"] = found
             if found:
                 pid = found[0].get("idPlayer", "")
-                with st.spinner("Pulling last 10 game logs..."):
+                with st.spinner("Pulling game logs from TheSportsDB..."):
                     logs = fetch_player_last10_tsdb(pid, TSDB_KEY.strip())
                 st.session_state["game_logs"] = logs
             else:
@@ -920,7 +1008,6 @@ with st.sidebar:
         else:
             st.warning("Enter a player name first.")
 
-    # ── TEAMMATE FILTER SECTION ────────────────
     st.markdown("---")
     st.markdown("### 👥 Teammate Filter")
 
@@ -953,14 +1040,12 @@ with st.sidebar:
             "Exclude players (simulate absence)",
             options=roster_list,
             default=st.session_state.get("excluded_players", []),
-            help="Hit rate will note games where these players were absent.",
             key="ms_exclude",
         )
         st.session_state["excluded_players"] = excl
     else:
         excl = []
 
-    # ── PARLAY CALCULATOR ──────────────────────
     st.markdown("---")
     st.markdown("### 🎰 Parlay Calculator")
     parlay_legs = st.session_state.get("parlay_legs", [])
@@ -997,12 +1082,16 @@ with tab1:
     active_line    = st.session_state.get("active_line", 0.0)
     excl           = st.session_state.get("excluded_players", [])
 
-    # Resolve stat label from active_stat key
-    stat_label = stat_option  # default to sidebar current
+    # Resolve the stat label from the sport that was active at lookup time.
+    # active_stat is stored in session state; look it up against current cfg
+    # but fall back to stat_option if the stored stat doesn't exist in current cfg.
+    stat_label = stat_option
     for lbl, sf in cfg["stat_fields"].items():
         if sf == active_stat:
             stat_label = lbl
             break
+    # If active_stat not in current cfg (sport was changed after lookup), note it
+    active_stat_display = active_stat if active_stat else stat_field
 
     if player_results is None:
         st.info("👈 Enter a player name & stat in the sidebar, then click **Apply — Look Up Player**.")
@@ -1039,11 +1128,23 @@ with tab1:
 
         st.markdown("---")
 
-        if not game_logs:
-            # Fallback chain: ESPN public API → Balldontlie season averages
-            with st.spinner("TheSportsDB returned no logs — trying ESPN..."):
-                game_logs = fetch_player_stats_espn(pname)
+        # ── DEBUG EXPANDER — shows raw TSDB response so you can see key names ──
+        with st.expander("🔬 Debug — TheSportsDB raw response", expanded=False):
+            pid_debug = player.get("idPlayer", "")
+            st.write(f"**Player ID:** `{pid_debug}`")
+            st.write(f"**Game logs returned:** `{len(game_logs) if game_logs else 0}`")
             if game_logs:
+                st.write("**First game keys/values:**")
+                st.json(game_logs[0])
+            else:
+                st.warning("TSDB returned 0 logs — ESPN fallback will trigger below.")
+
+        if not game_logs or not any(_has_numeric_stats(g) for g in game_logs):
+            with st.spinner("TheSportsDB returned no stat data — trying ESPN..."):
+                espn_logs = fetch_player_stats_espn(pname)
+            if espn_logs:
+                game_logs = espn_logs
+                st.session_state["game_logs"] = game_logs
                 st.info(f"📡 Game log data sourced from **ESPN** ({len(game_logs)} games found).")
             else:
                 bdl = fetch_player_stats_bdl(pname, BDL_KEY.strip())
@@ -1055,8 +1156,10 @@ with tab1:
                     cc.metric("AST avg", bdl.get("ast","N/A"))
                     cd.metric("MIN avg", bdl.get("min","N/A"))
                 else:
-                    st.error("No game log data from TheSportsDB, ESPN, or Balldontlie. Try a different player name or sport.")
-        else:
+                    st.error("No game log data from TheSportsDB, ESPN, or Balldontlie.")
+                game_logs = None
+
+        if game_logs and any(_has_numeric_stats(g) for g in game_logs):
             result   = compute_hit_rate(game_logs, active_stat, active_line)
             hit_rate = result["hit_rate"]
             avg_val  = result["avg"]
@@ -1084,7 +1187,6 @@ with tab1:
                         st.success("Added to parlay!")
                         st.rerun()
 
-                # Game log table
                 st.markdown("#### Last 10 Game Log")
                 rows = []
                 for g in game_logs:
@@ -1095,7 +1197,7 @@ with tab1:
                         val_f = None
                     rows.append({
                         "Date": g.get("dateEvent","")[:10],
-                        "Opponent": g.get("strAwayTeam","") or g.get("strOpponent",""),
+                        "Opponent": g.get("strOpponent",""),
                         stat_label: val_f if val_f is not None else "—",
                         f"O{active_line}?": "✅" if (val_f is not None and val_f >= active_line) else "❌",
                     })
@@ -1104,7 +1206,6 @@ with tab1:
                 else:
                     st.caption("No parseable game log rows.")
 
-                # Full multi-stat scan
                 st.markdown("---")
                 st.markdown(f"#### Full {sport} Stat Scan (all props)")
                 scan_rows = []
@@ -1140,7 +1241,6 @@ with tab2:
         with st.spinner("Fetching lines from The Odds API..."):
             odds_data, odds_error, quota_left = fetch_odds(odds_key, ODDS_KEY.strip(), ODDS_REGIONS.strip())
 
-        # Always show quota and diagnostic info
         diag_col1, diag_col2 = st.columns(2)
         diag_col1.caption(f"📊 Requests remaining (Odds API): **{quota_left}**")
 
@@ -1148,26 +1248,23 @@ with tab2:
             st.error(odds_error)
             st.stop()
         elif not odds_data:
-            # Sport returned 0 events — valid response, just no games
             st.info(f"✅ Odds API connected (quota left: {quota_left}). No upcoming/live {sport} events found — sport may be off-season or between rounds.")
             st.stop()
         else:
-            # Show which bookmakers are actually present in the response
             all_bk_keys = sorted({bk.get("key","") for ev in odds_data for bk in ev.get("bookmakers",[])})
             hr_present = any(k for k in all_bk_keys if "hardrock" in k or "hard_rock" in k)
             diag_col2.caption(
                 f"📚 Books in response: `{'`, `'.join(all_bk_keys) or 'none'}`  "
-                f"{'✅ Hard Rock found' if hr_present else '⚠️ Hard Rock NOT in response — HardRock column will show —'}"
+                f"{'✅ Hard Rock found' if hr_present else '⚠️ Hard Rock NOT in response'}"
             )
             if not hr_present:
                 st.warning(
-                    "Hard Rock Bet is not in this Odds API response. Hard Rock is only available in FL, NJ, OH, IN, PA, TN, VA, and AZ. "
-                    "The table will still show the **Market Median** from all other books. "
-                    "HardRock column will display '—'."
+                    "Hard Rock Bet is not in this Odds API response. "
+                    "Hard Rock is only available in FL, NJ, OH, IN, PA, TN, VA, and AZ. "
+                    "The table will still show the Market Median from all other books."
                 )
-            edge_rows = []
-            blowout_rule = cfg.get("blowout_rule", ("spread", 20))
 
+            edge_rows = []
             for event in odds_data:
                 home       = event.get("home_team", "")
                 away       = event.get("away_team", "")
@@ -1179,18 +1276,15 @@ with tab2:
                         hr_line = get_hardrock_line(bookmakers, market_key, team)
                         median  = get_market_median(bookmakers, market_key, team)
                         edge    = is_significant_edge(hr_line, median, market_key)
-                        rule_type, threshold = blowout_rule
-
-
                         edge_rows.append({
-                            "Time": commence,
+                            "Time":    commence,
                             "Matchup": f"{away} @ {home}",
-                            "Team": team,
-                            "Market": market_key.upper(),
+                            "Team":    team,
+                            "Market":  market_key.upper(),
                             "HardRock": hr_line,
-                            "Median": median,
-                            "Diff": round(hr_line - median, 1) if hr_line and median else None,
-                            "Edge": edge,
+                            "Median":   median,
+                            "Diff":     round(hr_line - median, 1) if (hr_line is not None and median is not None) else None,
+                            "Edge":     edge,
                         })
 
             if edge_rows:
@@ -1199,9 +1293,9 @@ with tab2:
                 body_e = ""
                 for _, row in df_edges.iterrows():
                     ef    = row.get("Edge", False)
-                    hr_d  = safe_odds_int(row['HardRock'])
-                    med_d = safe_odds_int(row['Median'])
-                    dif_d = safe_float(row['Diff'])
+                    hr_d  = safe_odds_int(row["HardRock"])
+                    med_d = safe_odds_int(row["Median"])
+                    dif_d = safe_float(row["Diff"])
                     edg_d = '<span class="badge-gold">🏅 EDGE</span>' if ef else '<span class="badge-gray">—</span>'
                     rs    = "background:#1c1507;" if ef else ""
                     body_e += (
@@ -1221,8 +1315,8 @@ with tab2:
                     st.markdown("---")
                     st.markdown("### 🏅 Market Edge Alerts")
                     for _, er in edge_events.iterrows():
-                        hr_v  = safe_odds_int(er['HardRock'])
-                        med_v = safe_odds_int(er['Median'])
+                        hr_v  = safe_odds_int(er["HardRock"])
+                        med_v = safe_odds_int(er["Median"])
                         st.markdown(
                             f'<div class="edge-alert">📌 <strong>{er["Team"]}</strong> ({er["Market"]}) — '
                             f'HardRock: <strong>{hr_v}</strong> vs Median: <strong>{med_v}</strong> '
@@ -1241,12 +1335,11 @@ with tab3:
     st.markdown(f"### 📡 Live & Today's {sport} Scores (API-Sports)")
 
     if not apisports_base:
-        st.info(f"Live scores via API-Sports are not available for **{sport}**. Use the Lines tab for odds.")
+        st.info(f"Live scores via API-Sports are not available for **{sport}**.")
     else:
         with st.spinner("Fetching live scores..."):
             live_games = fetch_live_scores_apisports(apisports_base, apisports_league, APIS_KEY.strip())
 
-        # Handle error sentinel
         if live_games and live_games[0].get("_error"):
             st.error(f"API-Sports error: {live_games[0]['_error']}")
         elif not live_games:
