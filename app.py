@@ -691,6 +691,30 @@ def is_blowout_risk(rule, spread=None, moneyline=None) -> bool:
         return True
     return False
 
+def safe_odds_int(val) -> str:
+    """Convert odds value to formatted string, safely handling None/NaN/non-numeric."""
+    try:
+        if val is None:
+            return "—"
+        import math
+        if isinstance(val, float) and math.isnan(val):
+            return "—"
+        return f"{int(val):+d}"
+    except (TypeError, ValueError):
+        return "—"
+
+def safe_float(val) -> str:
+    """Format a float safely, returning — for None/NaN."""
+    try:
+        if val is None:
+            return "—"
+        import math
+        if isinstance(val, float) and math.isnan(val):
+            return "—"
+        return f"{val:+.1f}"
+    except (TypeError, ValueError):
+        return "—"
+
 def build_hit_rate_badge(rate) -> str:
     if rate is None:
         return '<span class="badge-gray">N/A</span>'
@@ -1019,20 +1043,20 @@ with tab2:
                         rule_type, threshold = blowout_rule
 
                         if market_key == "spreads" and rule_type == "spread":
-                            for bk in bookmakers:
-                                for mkt in bk.get("markets",[]):
-                                    if mkt.get("key") == "spreads":
-                                        for out in mkt.get("outcomes",[]):
-                                            pt = out.get("point", 0)
-                                            if is_blowout_risk(blowout_rule, spread=pt):
-                                                blowout_warnings.append(
-                                                    f"⚠️ Blowout Risk — {home} vs {away}: spread {pt:+.1f}"
-                                                )
+                            # Use median spread, not every bookmaker's line (avoids duplicates)
+                            med_spread = get_market_median(bookmakers, "spreads", team)
+                            if med_spread is not None and not (isinstance(med_spread, float) and __import__("math").isnan(med_spread)):
+                                if is_blowout_risk(blowout_rule, spread=med_spread):
+                                    blowout_warnings.append(
+                                        f"⚠️ Blowout Risk — {home} vs {away}: spread {safe_float(med_spread)}"
+                                    )
                         if market_key == "h2h" and rule_type == "ml":
-                            if hr_line and is_blowout_risk(blowout_rule, moneyline=hr_line):
-                                blowout_warnings.append(
-                                    f"⚠️ Heavy Favorite — {team} ML {hr_line:+d} ({sport})"
-                                )
+                            ml_check = median  # use median ML, not just HardRock
+                            if ml_check and not (isinstance(ml_check, float) and __import__("math").isnan(ml_check)):
+                                if is_blowout_risk(blowout_rule, moneyline=ml_check):
+                                    blowout_warnings.append(
+                                        f"⚠️ Heavy Favorite — {team} ML {safe_odds_int(ml_check)} ({sport})"
+                                    )
 
                         edge_rows.append({
                             "Time": commence,
@@ -1054,9 +1078,9 @@ with tab2:
                 body_e = ""
                 for _, row in df_edges.iterrows():
                     ef    = row.get("Edge", False)
-                    hr_d  = f"{int(row['HardRock']):+d}"  if row['HardRock']  is not None else "—"
-                    med_d = f"{int(row['Median']):+d}"    if row['Median']    is not None else "—"
-                    dif_d = f"{row['Diff']:+.1f}"         if row['Diff']      is not None else "—"
+                    hr_d  = safe_odds_int(row['HardRock'])
+                    med_d = safe_odds_int(row['Median'])
+                    dif_d = safe_float(row['Diff'])
                     edg_d = '<span class="badge-gold">🏅 EDGE</span>' if ef else '<span class="badge-gray">—</span>'
                     rs    = "background:#1c1507;" if ef else ""
                     body_e += (
@@ -1076,12 +1100,12 @@ with tab2:
                     st.markdown("---")
                     st.markdown("### 🏅 Market Edge Alerts")
                     for _, er in edge_events.iterrows():
-                        hr_v  = f"{int(er['HardRock']):+d}" if er['HardRock'] is not None else "—"
-                        med_v = f"{int(er['Median']):+d}"   if er['Median']   is not None else "—"
+                        hr_v  = safe_odds_int(er['HardRock'])
+                        med_v = safe_odds_int(er['Median'])
                         st.markdown(
                             f'<div class="edge-alert">📌 <strong>{er["Team"]}</strong> ({er["Market"]}) — '
                             f'HardRock: <strong>{hr_v}</strong> vs Median: <strong>{med_v}</strong> '
-                            f'(Δ {er["Diff"]:+.1f})</div>',
+                            f'(Δ {safe_float(er["Diff"])})</div>',
                             unsafe_allow_html=True,
                         )
             else:
