@@ -568,99 +568,99 @@ def fetch_odds(sport_key: str, api_key: str, regions: str) -> tuple:
         return [], f"❌ Unexpected error: {e}", None
 
 
+def _tsdb_get(url: str, params: dict, tsdb_key: str):
+    """
+    TheSportsDB unified request helper.
+    V2 endpoints: key goes in X-API-KEY header (NOT in the URL path).
+    V1 endpoints: key is already embedded in the URL path by the caller.
+    Returns parsed JSON dict or None on failure.
+    """
+    headers = {}
+    if "/api/v2/" in url:
+        headers["X-API-KEY"] = tsdb_key
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=15)
+        if r.status_code != 200:
+            return None
+        return r.json()
+    except Exception:
+        return None
+
+
 @st.cache_data(ttl=24*3600, show_spinner=False)
 def search_player_tsdb(player_name: str, tsdb_key: str) -> list:
     """
-    Search TheSportsDB V2 then V1.
+    Search TheSportsDB. V2 key in header, V1 key in URL path.
     Tries Title Case, original casing, and last-name-only as fallback.
     """
     if not tsdb_key:
         return []
     cleaned = player_name.strip()
-    # Build deduplicated name variants
     name_variants = list(dict.fromkeys(filter(None, [
         cleaned.title(),
         cleaned,
         cleaned.split()[-1].title() if " " in cleaned else None,
     ])))
     for name_attempt in name_variants:
-        for base_url in [
-            f"https://www.thesportsdb.com/api/v2/json/{tsdb_key}/searchplayers.php",
+        for url in [
+            "https://www.thesportsdb.com/api/v2/json/searchplayers.php",
             f"https://www.thesportsdb.com/api/v1/json/{tsdb_key}/searchplayers.php",
         ]:
-            try:
-                r = requests.get(base_url, params={"p": name_attempt}, timeout=10)
-                if r.status_code != 200:
-                    continue
-                result = r.json().get("player") or []
+            data = _tsdb_get(url, {"p": name_attempt}, tsdb_key)
+            if data:
+                result = data.get("player") or []
                 if result:
                     return result
-            except Exception:
-                continue
     return []
 
 
 @st.cache_data(ttl=24*3600, show_spinner=False)
 def fetch_player_last10_tsdb(player_id: str, tsdb_key: str) -> list:
     """
-    TheSportsDB Premium V2 — correct endpoint chain for per-game player stats.
+    TheSportsDB per-game player stats.
+    V2: key in X-API-KEY header. V1: key in URL path.
 
-    Priority:
-    1. v2/playerstatistics.php?id=        — per-game log (premium)
-    2. v2/lookupplayerstatistics.php?id=  — alternate premium path
-    3. v2/playerevents.php?id=            — recent events with player
-    4. v1/playerstatistics.php?id=        — v1 fallback
-    5. v1/playerevents.php?id=            — v1 events fallback
-
-    All previous attempts used wrong endpoints (eventslast, lookupeventresults,
-    eventspastleague) that take team/event IDs, not player IDs — they all return
-    empty silently. This chain uses only player-ID-accepting endpoints.
+    Endpoint chain:
+    1. V2 playerstatistics.php   — per-game log (primary)
+    2. V2 lookupplayerstatistics.php — alternate
+    3. V2 playerevents.php       — event list fallback
+    4. V1 playerstatistics.php   — v1 fallback
+    5. V1 playerevents.php       — v1 event fallback
     """
     if not tsdb_key or not player_id:
         return []
 
-    base_v2 = f"https://www.thesportsdb.com/api/v2/json/{tsdb_key}"
-    base_v1 = f"https://www.thesportsdb.com/api/v1/json/{tsdb_key}"
-
     attempts = [
-        (f"{base_v2}/playerstatistics.php",       {"id": player_id}, ["playerstatistics", "results", "data"]),
-        (f"{base_v2}/lookupplayerstatistics.php",  {"id": player_id}, ["playerstatistics", "results", "data"]),
-        (f"{base_v2}/playerevents.php",            {"id": player_id}, ["events", "event", "results"]),
-        (f"{base_v1}/playerstatistics.php",        {"id": player_id}, ["playerstatistics", "results", "data"]),
-        (f"{base_v1}/playerevents.php",            {"id": player_id}, ["events", "event", "results"]),
+        ("https://www.thesportsdb.com/api/v2/json/playerstatistics.php",
+         {"id": player_id}, ["playerstatistics", "results", "data"]),
+        ("https://www.thesportsdb.com/api/v2/json/lookupplayerstatistics.php",
+         {"id": player_id}, ["playerstatistics", "results", "data"]),
+        ("https://www.thesportsdb.com/api/v2/json/playerevents.php",
+         {"id": player_id}, ["events", "event", "results"]),
+        (f"https://www.thesportsdb.com/api/v1/json/{tsdb_key}/playerstatistics.php",
+         {"id": player_id}, ["playerstatistics", "results", "data"]),
+        (f"https://www.thesportsdb.com/api/v1/json/{tsdb_key}/playerevents.php",
+         {"id": player_id}, ["events", "event", "results"]),
     ]
 
     for url, params, result_keys in attempts:
-        try:
-            r = requests.get(url, params=params, timeout=15)
-            if r.status_code != 200:
-                continue
-            data = r.json()
-
-            results = None
-            for key in result_keys:
-                candidate = data.get(key)
-                if isinstance(candidate, list) and len(candidate) > 0:
-                    results = candidate
-                    break
-
-            if not results:
-                continue
-
-            normalized = [_normalize_tsdb_game(g) for g in results]
-
-            # Prefer rows that have actual numeric stats
-            valid = [g for g in normalized if _has_numeric_stats(g)]
-            if valid:
-                return valid[:10]
-
-            # Return normalized anyway so ESPN fallback can be skipped if we at
-            # least got event metadata (opponent/date) — caller checks for stats
-            if normalized:
-                return normalized[:10]
-
-        except Exception:
+        data = _tsdb_get(url, params, tsdb_key)
+        if not data:
             continue
+        results = None
+        for key in result_keys:
+            candidate = data.get(key)
+            if isinstance(candidate, list) and len(candidate) > 0:
+                results = candidate
+                break
+        if not results:
+            continue
+        normalized = [_normalize_tsdb_game(g) for g in results]
+        valid = [g for g in normalized if _has_numeric_stats(g)]
+        if valid:
+            return valid[:10]
+        if normalized:
+            return normalized[:10]
 
     return []
 
@@ -669,26 +669,35 @@ def fetch_player_last10_tsdb(player_id: str, tsdb_key: str) -> list:
 def fetch_team_roster_tsdb(team_id: str, tsdb_key: str) -> list:
     if not tsdb_key:
         return []
-    url = f"https://www.thesportsdb.com/api/v2/json/{tsdb_key}/lookup_all_players.php"
-    try:
-        r = requests.get(url, params={"id": team_id}, timeout=15)
-        r.raise_for_status()
-        return r.json().get("player") or []
-    except Exception:
-        return []
+    data = _tsdb_get(
+        "https://www.thesportsdb.com/api/v2/json/lookup_all_players.php",
+        {"id": team_id}, tsdb_key
+    )
+    if data:
+        return data.get("player") or []
+    # V1 fallback
+    data = _tsdb_get(
+        f"https://www.thesportsdb.com/api/v1/json/{tsdb_key}/lookup_all_players.php",
+        {"id": team_id}, tsdb_key
+    )
+    return data.get("player") or [] if data else []
 
 
 @st.cache_data(ttl=7*24*3600, show_spinner=False)
 def search_team_tsdb(team_name: str, tsdb_key: str) -> list:
     if not tsdb_key:
         return []
-    url = f"https://www.thesportsdb.com/api/v2/json/{tsdb_key}/searchteams.php"
-    try:
-        r = requests.get(url, params={"t": team_name}, timeout=10)
-        r.raise_for_status()
-        return r.json().get("teams") or []
-    except Exception:
-        return []
+    data = _tsdb_get(
+        "https://www.thesportsdb.com/api/v2/json/searchteams.php",
+        {"t": team_name}, tsdb_key
+    )
+    if data:
+        return data.get("teams") or []
+    data = _tsdb_get(
+        f"https://www.thesportsdb.com/api/v1/json/{tsdb_key}/searchteams.php",
+        {"t": team_name}, tsdb_key
+    )
+    return data.get("teams") or [] if data else []
 
 
 @st.cache_data(ttl=24*3600, show_spinner=False)
@@ -728,11 +737,15 @@ def fetch_player_stats_espn(player_name: str) -> list:
         if not athlete_id or not sport_path:
             return []
 
-        # Season: for NBA/NHL use current year if after July, else prior year.
-        # For NFL/MLB use current calendar year.
+        # ESPN season label = the ENDING year of the season.
+        # NBA/NHL 2024-25 → season=2025. New season starts ~October.
+        # NFL 2024 → season=2024. New season starts ~September.
+        # MLB 2025 → season=2025. New season starts ~March/April.
         now = datetime.now()
         if sport_path in ("basketball/nba", "hockey/nhl"):
-            espn_season = str(now.year) if now.month >= 9 else str(now.year - 1 if now.month < 7 else now.year)
+            espn_season = str(now.year) if now.month >= 10 else str(now.year - 1 if now.month < 7 else now.year)
+        elif sport_path == "football/nfl":
+            espn_season = str(now.year) if now.month >= 9 else str(now.year - 1)
         else:
             espn_season = str(now.year)
         log_url = f"https://site.web.api.espn.com/apis/common/v3/sports/{sport_path}/athletes/{athlete_id}/gamelog"
