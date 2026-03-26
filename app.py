@@ -430,11 +430,11 @@ for _k, _v in {
     "active_line": 0.0,
     "player_results": None,
     "game_logs": None,
+    "log_source": None,
     "active_team": "",
     "roster_list": [],
     "excluded_players": [],
     "parlay_legs": [],
-    "tsdb_debug": [],
 }.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
@@ -616,65 +616,102 @@ def search_player_tsdb(player_name: str, tsdb_key: str) -> list:
 
 
 @st.cache_data(ttl=24*3600, show_spinner=False)
-def fetch_player_last10_tsdb(player_id: str, tsdb_key: str) -> tuple:
+def fetch_player_gamelogs_bdl(player_name: str, bdl_key: str, sport: str) -> list:
     """
-    Returns (logs: list, debug_log: list).
-    Tries every plausible TSDB endpoint and logs exactly what each returns.
+    Balldontlie per-game stats — primary game log source for NBA and MLB.
+    Returns list of dicts with normalized intXxx stat keys.
     """
-    import json as _json
-    if not tsdb_key or not player_id:
-        return [], ["No key or player ID."]
+    if not bdl_key:
+        return []
 
-    attempts = [
-        ("https://www.thesportsdb.com/api/v2/json/playerstatistics.php",
-         {"id": player_id}, ["playerstatistics", "results", "data"]),
-        ("https://www.thesportsdb.com/api/v2/json/lookupplayerstatistics.php",
-         {"id": player_id}, ["playerstatistics", "results", "data"]),
-        ("https://www.thesportsdb.com/api/v2/json/playerevents.php",
-         {"id": player_id}, ["events", "event", "results"]),
-        (f"https://www.thesportsdb.com/api/v1/json/{tsdb_key}/playerstatistics.php",
-         {"id": player_id}, ["playerstatistics", "results", "data"]),
-        (f"https://www.thesportsdb.com/api/v1/json/{tsdb_key}/playerevents.php",
-         {"id": player_id}, ["events", "event", "results"]),
-    ]
+    # Only NBA and MLB are supported by Balldontlie
+    if sport not in ("NBA", "MLB", "NCAAB", "WNBA", "NBA G League"):
+        return []
 
-    debug_log = []
-    for url, params, result_keys in attempts:
-        label = url.split("/json/")[-1]
-        try:
-            hdrs = {"X-API-KEY": tsdb_key} if "/api/v2/" in url else {}
-            r = requests.get(url, params=params, headers=hdrs, timeout=15)
-            if r.status_code != 200:
-                debug_log.append(f"[{r.status_code}] {label}")
-                continue
-            body = r.json()
-            top_keys = list(body.keys()) if isinstance(body, dict) else type(body).__name__
-            list_lens = {k: len(v) for k, v in body.items() if isinstance(v, list)} if isinstance(body, dict) else {}
-            snippet = _json.dumps(body)[:300]
-            debug_log.append(f"[200] {label} keys={top_keys} lists={list_lens}")
-            debug_log.append(f"  raw: {snippet}")
+    headers = {"Authorization": bdl_key}
 
-            results = None
-            for key in result_keys:
-                candidate = body.get(key)
-                if isinstance(candidate, list) and len(candidate) > 0:
-                    results = candidate
-                    break
-            if not results:
-                continue
+    try:
+        # Step 1: find player ID
+        r = requests.get(
+            "https://api.balldontlie.io/v1/players",
+            params={"search": player_name, "per_page": 5},
+            headers=headers, timeout=10,
+        )
+        r.raise_for_status()
+        players = r.json().get("data", [])
+        if not players:
+            return []
+        pid = players[0]["id"]
 
-            normalized = [_normalize_tsdb_game(g) for g in results]
-            valid = [g for g in normalized if _has_numeric_stats(g)]
-            if valid:
-                debug_log.append(f"  >>> SUCCESS: {len(valid)} stat rows")
-                return valid[:10], debug_log
-            if normalized:
-                debug_log.append(f"  >>> {len(normalized)} rows but no numeric stats after normalize")
-                return normalized[:10], debug_log
-        except Exception as e:
-            debug_log.append(f"[ERR] {label}: {e}")
+        # Step 2: fetch recent game stats
+        # Use current season — NBA season year = calendar year the season ends in
+        now = datetime.now()
+        season = now.year if now.month >= 9 else now.year - 1
 
-    return [], debug_log
+        sr = requests.get(
+            "https://api.balldontlie.io/v1/stats",
+            params={
+                "player_ids[]": pid,
+                "seasons[]": season,
+                "per_page": 15,
+            },
+            headers=headers, timeout=10,
+        )
+        sr.raise_for_status()
+        raw_stats = sr.json().get("data", [])
+
+        if not raw_stats:
+            # Try prior season if current returns nothing (e.g. early in season)
+            sr2 = requests.get(
+                "https://api.balldontlie.io/v1/stats",
+                params={
+                    "player_ids[]": pid,
+                    "seasons[]": season - 1,
+                    "per_page": 15,
+                },
+                headers=headers, timeout=10,
+            )
+            sr2.raise_for_status()
+            raw_stats = sr2.json().get("data", [])
+
+        if not raw_stats:
+            return []
+
+        # Step 3: normalize to intXxx format
+        # BDL stat keys: pts, reb, ast, stl, blk, fgm, fga, fg3m, fg3a, ftm, fta,
+        #                oreb, dreb, turnover, min
+        bdl_map = {
+            "pts":      "intPoints",
+            "reb":      "intRebounds",
+            "ast":      "intAssists",
+            "stl":      "intSteals",
+            "blk":      "intBlocks",
+            "fg3m":     "intThrees",
+            "turnover": "intTurnovers",
+        }
+
+        normalized = []
+        for entry in raw_stats:
+            game_info = entry.get("game", {})
+            date      = game_info.get("date", "")[:10]
+            home_team = entry.get("team", {}).get("abbreviation", "")
+            g = {"dateEvent": date, "strOpponent": home_team}
+            for bdl_key_name, int_key in bdl_map.items():
+                val = entry.get(bdl_key_name)
+                if val is not None:
+                    try:
+                        g[int_key] = float(val)
+                    except (TypeError, ValueError):
+                        pass
+            if _has_numeric_stats(g):
+                normalized.append(g)
+
+        # Sort by date descending, return last 10
+        normalized.sort(key=lambda x: x.get("dateEvent", ""), reverse=True)
+        return normalized[:10]
+
+    except Exception:
+        return []
 
 
 @st.cache_data(ttl=7*24*3600, show_spinner=False)
@@ -804,7 +841,8 @@ def fetch_player_stats_espn(player_name: str) -> list:
 
 
 @st.cache_data(ttl=24*3600, show_spinner=False)
-def fetch_player_stats_bdl(player_name: str, bdl_key: str) -> dict:
+def fetch_player_season_avg_bdl(player_name: str, bdl_key: str) -> dict:
+    """Balldontlie season averages — used only as last-resort display fallback."""
     if not bdl_key:
         return {}
     headers = {"Authorization": bdl_key}
@@ -819,7 +857,8 @@ def fetch_player_stats_bdl(player_name: str, bdl_key: str) -> dict:
         if not players:
             return {}
         pid = players[0]["id"]
-        season = datetime.now().year - (1 if datetime.now().month < 8 else 0)
+        now = datetime.now()
+        season = now.year if now.month >= 9 else now.year - 1
         sr = requests.get(
             "https://api.balldontlie.io/v1/season_averages",
             params={"player_ids[]": pid, "season": season},
@@ -1017,21 +1056,27 @@ with st.sidebar:
 
     if st.button("🔎 Apply — Look Up Player", key="btn_lookup"):
         if player_input.strip():
-            with st.spinner(f"Searching TheSportsDB for {player_input}..."):
-                found = search_player_tsdb(player_input.strip(), TSDB_KEY.strip())
-            st.session_state["active_player"]  = player_input.strip()
+            pname_input = player_input.strip()
+            st.session_state["active_player"]  = pname_input
             st.session_state["active_stat"]    = stat_field
             st.session_state["active_line"]    = line_val
+
+            # Step 1: TSDB for player profile/photo only
+            with st.spinner(f"Looking up {pname_input}..."):
+                found = search_player_tsdb(pname_input, TSDB_KEY.strip())
             st.session_state["player_results"] = found
-            if found:
-                pid = found[0].get("idPlayer", "")
-                with st.spinner("Pulling game logs from TheSportsDB..."):
-                    logs, tsdb_debug = fetch_player_last10_tsdb(pid, TSDB_KEY.strip())
-                st.session_state["game_logs"] = logs
-                st.session_state["tsdb_debug"] = tsdb_debug
-            else:
-                st.session_state["game_logs"] = []
-                st.session_state["tsdb_debug"] = []
+
+            # Step 2: Game logs — BDL first (NBA/MLB), ESPN fallback for others
+            with st.spinner("Fetching game logs..."):
+                logs = fetch_player_gamelogs_bdl(pname_input, BDL_KEY.strip(), sport)
+                log_source = "Balldontlie" if logs else None
+
+                if not logs:
+                    logs = fetch_player_stats_espn(pname_input)
+                    log_source = "ESPN" if logs else None
+
+            st.session_state["game_logs"]   = logs
+            st.session_state["log_source"]  = log_source
         else:
             st.warning("Enter a player name first.")
 
@@ -1107,41 +1152,30 @@ with tab1:
     active_player  = st.session_state.get("active_player", "")
     active_stat    = st.session_state.get("active_stat", "")
     active_line    = st.session_state.get("active_line", 0.0)
+    log_source     = st.session_state.get("log_source", None)
     excl           = st.session_state.get("excluded_players", [])
 
-    # Resolve the stat label from the sport that was active at lookup time.
-    # active_stat is stored in session state; look it up against current cfg
-    # but fall back to stat_option if the stored stat doesn't exist in current cfg.
     stat_label = stat_option
     for lbl, sf in cfg["stat_fields"].items():
         if sf == active_stat:
             stat_label = lbl
             break
-    # If active_stat not in current cfg (sport was changed after lookup), note it
-    active_stat_display = active_stat if active_stat else stat_field
 
-    if player_results is None:
+    if player_results is None and not game_logs:
         st.info("👈 Enter a player name & stat in the sidebar, then click **Apply — Look Up Player**.")
 
-    elif player_results == []:
-        st.warning(f"TheSportsDB found no results for **{active_player}** — trying Balldontlie fallback...")
-        bdl_stats = fetch_player_stats_bdl(active_player, BDL_KEY.strip())
-        if bdl_stats:
-            st.success("✅ Balldontlie season averages found.")
-            ca, cb, cc, cd = st.columns(4)
-            ca.metric("PTS avg", bdl_stats.get("pts","N/A"))
-            cb.metric("REB avg", bdl_stats.get("reb","N/A"))
-            cc.metric("AST avg", bdl_stats.get("ast","N/A"))
-            cd.metric("BLK avg", bdl_stats.get("blk","N/A"))
-        else:
-            st.error("No player data found in any source. Check spelling or try a different sport filter.")
-
     else:
-        player = player_results[0]
-        pname  = player.get("strPlayer", active_player)
-        pteam  = player.get("strTeam", "Unknown")
-        ppos   = player.get("strPosition", "")
-        pthumb = player.get("strThumb", "")
+        # ── Player header ────────────────────────────────────────────────────
+        pname  = active_player
+        pteam  = ""
+        ppos   = ""
+        pthumb = ""
+        if player_results:
+            p      = player_results[0]
+            pname  = p.get("strPlayer", active_player)
+            pteam  = p.get("strTeam", "")
+            ppos   = p.get("strPosition", "")
+            pthumb = p.get("strThumb", "")
 
         col_img, col_info = st.columns([1, 4])
         with col_img:
@@ -1149,49 +1183,32 @@ with tab1:
                 st.image(pthumb, width=90)
         with col_info:
             st.markdown(f"### {pname}")
-            st.markdown(f"**{pteam}** · {ppos} · {sport}")
+            if pteam or ppos:
+                st.markdown(f"**{pteam}** · {ppos} · {sport}")
+            if log_source:
+                st.caption(f"📊 Stats sourced from **{log_source}**")
             if excl:
-                st.markdown(f"🚫 Simulating absence of: {', '.join(excl)}")
+                st.markdown(f"🚫 Excluding: {', '.join(excl)}")
 
         st.markdown("---")
 
-        # ── DEBUG EXPANDER — shows raw TSDB response so you can see key names ──
-        with st.expander("🔬 Debug — TheSportsDB raw response", expanded=False):
-            pid_debug = player.get("idPlayer", "")
-            st.write(f"**Player ID:** `{pid_debug}`")
-            st.write(f"**Game logs returned:** `{len(game_logs) if game_logs else 0}`")
-            tsdb_debug = st.session_state.get("tsdb_debug", [])
-            if tsdb_debug:
-                st.markdown("**Endpoint probe results:**")
-                for line in tsdb_debug:
-                    st.code(line)
-            if game_logs:
-                st.write("**First game keys/values:**")
-                st.json(game_logs[0])
-            else:
-                st.warning("TSDB returned 0 logs — ESPN fallback will trigger below.")
-
+        # ── No game logs — try season averages as last resort ────────────────
         if not game_logs or not any(_has_numeric_stats(g) for g in game_logs):
-            with st.spinner("TheSportsDB returned no stat data — trying ESPN..."):
-                espn_logs = fetch_player_stats_espn(pname)
-            if espn_logs:
-                game_logs = espn_logs
-                st.session_state["game_logs"] = game_logs
-                st.info(f"📡 Game log data sourced from **ESPN** ({len(game_logs)} games found).")
+            bdl = fetch_player_season_avg_bdl(pname, BDL_KEY.strip())
+            if bdl:
+                st.info("📊 Showing **season averages** from Balldontlie (no per-game log available for this sport/player).")
+                ca, cb, cc, cd = st.columns(4)
+                ca.metric("PTS avg", bdl.get("pts", "N/A"))
+                cb.metric("REB avg", bdl.get("reb", "N/A"))
+                cc.metric("AST avg", bdl.get("ast", "N/A"))
+                cd.metric("MIN avg", bdl.get("min", "N/A"))
             else:
-                bdl = fetch_player_stats_bdl(pname, BDL_KEY.strip())
-                if bdl:
-                    st.info("Season averages from Balldontlie (NBA/MLB only — no per-game logs):")
-                    ca, cb, cc, cd = st.columns(4)
-                    ca.metric("PTS avg", bdl.get("pts","N/A"))
-                    cb.metric("REB avg", bdl.get("reb","N/A"))
-                    cc.metric("AST avg", bdl.get("ast","N/A"))
-                    cd.metric("MIN avg", bdl.get("min","N/A"))
-                else:
-                    st.error("No game log data from TheSportsDB, ESPN, or Balldontlie.")
-                game_logs = None
+                st.error(f"No game log data found for **{pname}**. "
+                         "For NBA players use the exact full name (e.g. 'Jaylen Brown'). "
+                         "Non-NBA sports use ESPN fallback — player may be inactive or name may differ.")
 
-        if game_logs and any(_has_numeric_stats(g) for g in game_logs):
+        # ── Game logs available — show hit rates ─────────────────────────────
+        else:
             result   = compute_hit_rate(game_logs, active_stat, active_line)
             hit_rate = result["hit_rate"]
             avg_val  = result["avg"]
@@ -1200,12 +1217,12 @@ with tab1:
             if green_light and (hit_rate is None or hit_rate < 70):
                 st.warning(
                     f"🔒 Green Light active — {pname} {stat_label} hit rate "
-                    f"({hit_rate}%) is below 70%. Toggle off in sidebar to view."
+                    f"({hit_rate}%) is below 70%. Toggle off to view."
                 )
             else:
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("Hit Rate", f"{hit_rate}%" if hit_rate is not None else "N/A")
-                c2.metric("Avg", f"{avg_val}" if avg_val is not None else "N/A")
+                c2.metric("Avg", str(avg_val) if avg_val is not None else "N/A")
                 c3.metric("Line", f"O {active_line}")
                 c4.metric("Games Sampled", n_games)
 
@@ -1219,6 +1236,7 @@ with tab1:
                         st.success("Added to parlay!")
                         st.rerun()
 
+                # Game log table
                 st.markdown("#### Last 10 Game Log")
                 rows = []
                 for g in game_logs:
@@ -1228,8 +1246,8 @@ with tab1:
                     except (TypeError, ValueError):
                         val_f = None
                     rows.append({
-                        "Date": g.get("dateEvent","")[:10],
-                        "Opponent": g.get("strOpponent",""),
+                        "Date":     g.get("dateEvent", "")[:10],
+                        "Opponent": g.get("strOpponent", ""),
                         stat_label: val_f if val_f is not None else "—",
                         f"O{active_line}?": "✅" if (val_f is not None and val_f >= active_line) else "❌",
                     })
@@ -1238,19 +1256,20 @@ with tab1:
                 else:
                     st.caption("No parseable game log rows.")
 
+                # Full stat scan
                 st.markdown("---")
-                st.markdown(f"#### Full {sport} Stat Scan (all props)")
+                st.markdown(f"#### Full {sport} Stat Scan")
                 scan_rows = []
                 for lbl, sf in cfg["stat_fields"].items():
                     dl = cfg["default_lines"].get(sf, 1.5)
                     r2 = compute_hit_rate(game_logs, sf, dl)
                     scan_rows.append({
                         "Player": pname,
-                        "Stat": lbl,
-                        "Line": dl,
-                        "Badge": build_hit_rate_badge(r2["hit_rate"]),
-                        "Avg": r2["avg"] if r2["avg"] is not None else "—",
-                        "Games": r2["games"],
+                        "Stat":   lbl,
+                        "Line":   dl,
+                        "Badge":  build_hit_rate_badge(r2["hit_rate"]),
+                        "Avg":    r2["avg"] if r2["avg"] is not None else "—",
+                        "Games":  r2["games"],
                     })
                 scan_df = pd.DataFrame(scan_rows)
                 if green_light:
