@@ -577,6 +577,111 @@ def search_team_tsdb(team_name: str, tsdb_key: str) -> list:
         return []
 
 @st.cache_data(ttl=24*3600, show_spinner=False)
+def fetch_player_stats_espn(player_name: str) -> list:
+    """
+    ESPN public API fallback for player game logs.
+    No key required. Searches ESPN athlete lookup then pulls recent game log.
+    Returns list of dicts with normalized stat keys matching TheSportsDB format.
+    """
+    try:
+        # Step 1: search ESPN for athlete ID
+        search_url = "https://site.api.espn.com/apis/common/v3/search"
+        sr = requests.get(search_url, params={"query": player_name, "limit": 5, "type": "athlete"}, timeout=10)
+        if sr.status_code != 200:
+            return []
+        results = sr.json().get("results", [])
+        athlete_id = None
+        sport_path = None
+        for res in results:
+            items = res.get("contents", [])
+            for item in items:
+                if item.get("type") == "athlete":
+                    athlete_id = item.get("id")
+                    # Determine sport from description
+                    desc = (item.get("description") or "").lower()
+                    if "basketball" in desc or "nba" in desc:
+                        sport_path = "basketball/nba"
+                    elif "football" in desc or "nfl" in desc:
+                        sport_path = "football/nfl"
+                    elif "baseball" in desc or "mlb" in desc:
+                        sport_path = "baseball/mlb"
+                    elif "hockey" in desc or "nhl" in desc:
+                        sport_path = "hockey/nhl"
+                    else:
+                        sport_path = "basketball/nba"
+                    break
+            if athlete_id:
+                break
+
+        if not athlete_id or not sport_path:
+            return []
+
+        # Step 2: pull game log
+        log_url = f"https://site.web.api.espn.com/apis/common/v3/sports/{sport_path}/athletes/{athlete_id}/gamelog"
+        lr = requests.get(log_url, params={"season": "2025"}, timeout=10)
+        if lr.status_code != 200:
+            return []
+        log_data = lr.json()
+
+        # Step 3: parse into normalized dicts
+        categories = log_data.get("categories", [])
+        events = log_data.get("events", {})
+        stat_labels = []
+        for cat in categories:
+            for label in cat.get("labels", []):
+                stat_labels.append(label)
+
+        # Map ESPN labels to TheSportsDB-style keys
+        label_map = {
+            "PTS": "intPoints", "REB": "intRebounds", "AST": "intAssists",
+            "3PM": "intThrees", "STL": "intSteals", "BLK": "intBlocks",
+            "PY": "intPassingYards", "RY": "intRushingYards", "REC": "intReceivingYards",
+            "TD": "intTouchdowns", "H": "intHits", "SO": "intStrikeouts",
+            "RBI": "intRBI", "HR": "intHomeRuns", "G": "intGoals", "A": "intAssists",
+            "S": "intShots", "SV": "intSaves",
+        }
+
+        normalized = []
+        event_items = log_data.get("events", {})
+        # ESPN gamelog structure: events is a dict keyed by event id
+        if isinstance(event_items, dict):
+            event_list = list(event_items.values())[:10]
+        else:
+            event_list = event_items[:10]
+
+        # Get stats array — ESPN stores as parallel arrays
+        all_stats = log_data.get("seasonTypes", [])
+        stat_rows = []
+        for stype in all_stats:
+            for cat in stype.get("categories", []):
+                for event_stat in cat.get("events", []):
+                    stat_rows.append({
+                        "eventId": event_stat.get("eventId"),
+                        "stats": event_stat.get("stats", []),
+                        "labels": cat.get("labels", []),
+                    })
+
+        for row in stat_rows[:10]:
+            game = {}
+            labels = row.get("labels", [])
+            stats  = row.get("stats", [])
+            for i, lbl in enumerate(labels):
+                mapped = label_map.get(lbl, f"int{lbl}")
+                if i < len(stats):
+                    try:
+                        game[mapped] = float(stats[i])
+                    except (ValueError, TypeError):
+                        pass
+            game["dateEvent"] = ""
+            game["strOpponent"] = ""
+            if game:
+                normalized.append(game)
+
+        return normalized[:10]
+    except Exception:
+        return []
+
+@st.cache_data(ttl=24*3600, show_spinner=False)
 def fetch_player_stats_bdl(player_name: str, bdl_key: str) -> dict:
     if not bdl_key:
         return {}
@@ -694,10 +799,24 @@ def get_hardrock_line(bookmakers: list, market_key: str, team: str):
                     return out.get("price")
     return None
 
-def is_significant_edge(hr, median, threshold=15.0) -> bool:
+def is_significant_edge(hr, median, market_key: str = "h2h") -> bool:
+    """
+    Market-aware edge detection:
+    - H2H moneyline: only flag if diff >= 8% of the median absolute value
+      (avoids noise on big favorites like -3000 where 15pts means nothing)
+    - Spreads/Totals: flag if point difference >= 0.5
+    """
+    import math
     if hr is None or median is None:
         return False
-    return abs(hr - median) >= threshold
+    if isinstance(hr, float) and math.isnan(hr): return False
+    if isinstance(median, float) and math.isnan(median): return False
+    diff = abs(hr - median)
+    if market_key in ("spreads", "totals"):
+        return diff >= 0.5
+    else:  # h2h moneyline — proportional threshold
+        base = abs(median) if median != 0 else 1
+        return diff >= max(20, base * 0.08)
 
 def is_blowout_risk(rule, spread=None, moneyline=None) -> bool:
     rule_type, threshold = rule
@@ -923,16 +1042,22 @@ with tab1:
         st.markdown("---")
 
         if not game_logs:
-            st.warning("No game log data from TheSportsDB — checking Balldontlie...")
-            bdl = fetch_player_stats_bdl(pname, BDL_KEY.strip())
-            if bdl:
-                st.info("Season averages (Balldontlie — NBA/MLB only):")
-                ca, cb, cc = st.columns(3)
-                ca.metric("PTS avg", bdl.get("pts","N/A"))
-                cb.metric("REB avg", bdl.get("reb","N/A"))
-                cc.metric("AST avg", bdl.get("ast","N/A"))
+            # Fallback chain: ESPN public API → Balldontlie season averages
+            with st.spinner("TheSportsDB returned no logs — trying ESPN..."):
+                game_logs = fetch_player_stats_espn(pname)
+            if game_logs:
+                st.info(f"📡 Game log data sourced from **ESPN** ({len(game_logs)} games found).")
             else:
-                st.error("No game log data available from any source.")
+                bdl = fetch_player_stats_bdl(pname, BDL_KEY.strip())
+                if bdl:
+                    st.info("Season averages from Balldontlie (NBA/MLB only — no per-game logs):")
+                    ca, cb, cc, cd = st.columns(4)
+                    ca.metric("PTS avg", bdl.get("pts","N/A"))
+                    cb.metric("REB avg", bdl.get("reb","N/A"))
+                    cc.metric("AST avg", bdl.get("ast","N/A"))
+                    cd.metric("MIN avg", bdl.get("min","N/A"))
+                else:
+                    st.error("No game log data from TheSportsDB, ESPN, or Balldontlie. Try a different player name or sport.")
         else:
             result   = compute_hit_rate(game_logs, active_stat, active_line)
             hit_rate = result["hit_rate"]
@@ -1055,7 +1180,7 @@ with tab2:
                     for market_key in ["h2h", "spreads"]:
                         hr_line = get_hardrock_line(bookmakers, market_key, team)
                         median  = get_market_median(bookmakers, market_key, team)
-                        edge    = is_significant_edge(hr_line, median)
+                        edge    = is_significant_edge(hr_line, median, market_key)
                         rule_type, threshold = blowout_rule
 
 
